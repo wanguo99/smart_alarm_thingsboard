@@ -15,6 +15,8 @@ class ProductionSettingsTest(unittest.TestCase):
         ca.write_text("test-ca", encoding="utf-8")
         public_key = root / "policy.pem"
         public_key.write_text("test-public-key", encoding="utf-8")
+        device_secrets = root / "device-secrets"
+        device_secrets.mkdir()
         self.env = {
             "SMART_ALARM_ENVIRONMENT": "staging-cn",
             "SMART_ALARM_DEPLOYMENT_COMMIT": "0123456789abcdef",
@@ -42,6 +44,9 @@ class ProductionSettingsTest(unittest.TestCase):
             "SMART_ALARM_OIDC_CLIENT_ID": "smart-alarm-web",
             "SMART_ALARM_OIDC_CLIENT_SECRET": "oidc-client-secret-value",
             "SMART_ALARM_SESSION_KEY": "a" * 32,
+            "SMART_ALARM_DEVICE_SECRET_ROOT": str(device_secrets),
+            "SMART_ALARM_DEVICE_SECRET_KEY": "d" * 32,
+            "SMART_ALARM_DEVICE_SECRET_KEY_VERSION": "1",
             "SMART_ALARM_POLICY_PUBLIC_KEY_FILE": str(public_key),
             "SMART_ALARM_ALLOWED_ORIGINS": "https://alarm.example.com",
             "SMART_ALARM_S3_ENDPOINT": "https://objects.example.com",
@@ -74,6 +79,12 @@ class ProductionSettingsTest(unittest.TestCase):
         self.assertNotIn("valkey-password-value", representation)
         self.assertNotIn("key=secret", representation)
         self.assertNotIn("session_key", settings.public_summary())
+        self.assertNotIn("device_secret_key", settings.public_summary())
+
+    def test_requires_exact_device_secret_key_length(self) -> None:
+        self.env["SMART_ALARM_DEVICE_SECRET_KEY"] = "d" * 33
+        with self.assertRaisesRegex(ConfigError, "exactly 32 bytes"):
+            ProductionSettings.from_env(self.env)
 
     def test_rejects_insecure_transport(self) -> None:
         self.env["TB_HTTP_URL"] = "http://tb.example.com"
@@ -106,6 +117,9 @@ class ProductionSettingsTest(unittest.TestCase):
 
 class LocalSettingsTest(unittest.TestCase):
     def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        device_secrets = Path(self.temporary.name) / "device-secrets"
+        device_secrets.mkdir()
         self.env = {
             "SMART_ALARM_ENVIRONMENT": "local",
             "SMART_ALARM_DEPLOYMENT_COMMIT": "0123456789abcdef",
@@ -119,8 +133,14 @@ class LocalSettingsTest(unittest.TestCase):
             "SMART_ALARM_VALKEY_HOST": "localhost",
             "SMART_ALARM_VALKEY_PORT": "6379",
             "SMART_ALARM_SESSION_KEY": "a" * 32,
+            "SMART_ALARM_DEVICE_SECRET_ROOT": str(device_secrets),
+            "SMART_ALARM_DEVICE_SECRET_KEY": "d" * 32,
+            "SMART_ALARM_DEVICE_SECRET_KEY_VERSION": "1",
             "SMART_ALARM_ALLOWED_ORIGINS": "http://127.0.0.1:5173,http://localhost:5173",
         }
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
 
     def test_accepts_loopback_dependencies_without_tls(self) -> None:
         settings = LocalSettings.from_env(self.env)
@@ -131,6 +151,7 @@ class LocalSettingsTest(unittest.TestCase):
         self.assertFalse(settings.secure_cookies)
         self.assertEqual(settings.bind_host, "127.0.0.1")
         self.assertEqual(settings.session_cookie_name, "smart_alarm_session_local")
+        self.assertEqual(settings.device_secret_key_version, 1)
 
     def test_rejects_non_loopback_http_origins(self) -> None:
         for name, value in (

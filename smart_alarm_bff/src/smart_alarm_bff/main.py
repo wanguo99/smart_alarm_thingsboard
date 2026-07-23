@@ -13,6 +13,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_
 import uvicorn
 
 from . import __version__
+from .activation_routes import mount_activation_routes
 from .config import ConfigError, load_settings
 from .infrastructure import Infrastructure
 from .directory_routes import mount_directory_routes
@@ -146,6 +147,7 @@ def create_app() -> FastAPI:
     mount_directory_routes(app, sessions, infrastructure.database)
     mount_write_routes(app, sessions, infrastructure.database, infrastructure.thingsboard)
     mount_device_routes(app, sessions, infrastructure.database)
+    mount_activation_routes(app, infrastructure.database, infrastructure.device_secrets)
 
     return app
 

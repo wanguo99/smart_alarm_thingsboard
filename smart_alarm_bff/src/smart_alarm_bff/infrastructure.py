@@ -12,12 +12,18 @@ import httpx
 from redis.asyncio import Redis
 
 from .config import LocalSettings, ProductionSettings
+from .secret_provider import EncryptedFileSecretStore
 from .thingsboard import ThingsBoardClient
 
 
 class Infrastructure:
     def __init__(self, settings: ProductionSettings | LocalSettings) -> None:
         self.settings = settings
+        self.device_secrets = EncryptedFileSecretStore(
+            settings.device_secret_root,
+            settings.device_secret_key,
+            settings.device_secret_key_version,
+        )
         self._database_pool: asyncpg.Pool[Any] | None = None
         self._database_lock = asyncio.Lock()
         valkey_options: dict[str, object] = {

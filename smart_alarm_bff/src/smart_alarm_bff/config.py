@@ -84,6 +84,24 @@ def _readable_file(env: Mapping[str, str], name: str) -> Path:
     return path
 
 
+def _directory(env: Mapping[str, str], name: str) -> Path:
+    path = Path(_required(env, name)).resolve()
+    if not path.is_dir():
+        raise ConfigError(f"{name} must reference a directory")
+    return path
+
+
+def _integer(env: Mapping[str, str], name: str, minimum: int, maximum: int) -> int:
+    raw = _required(env, name)
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be an integer") from exc
+    if not minimum <= value <= maximum:
+        raise ConfigError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
 def read_secret(env: Mapping[str, str], name: str, *, minimum_bytes: int = 1) -> bytes:
     inline = env.get(name, "")
     file_name = env.get(f"{name}_FILE", "").strip()
@@ -99,6 +117,13 @@ def read_secret(env: Mapping[str, str], name: str, *, minimum_bytes: int = 1) ->
         value = inline.encode("utf-8")
     if len(value) < minimum_bytes:
         raise ConfigError(f"{name} must contain at least {minimum_bytes} bytes")
+    return value
+
+
+def _device_secret_key(env: Mapping[str, str]) -> bytes:
+    value = read_secret(env, "SMART_ALARM_DEVICE_SECRET_KEY", minimum_bytes=32)
+    if len(value) != 32:
+        raise ConfigError("SMART_ALARM_DEVICE_SECRET_KEY must contain exactly 32 bytes")
     return value
 
 
@@ -148,6 +173,9 @@ class ProductionSettings:
     oidc_client_id: str
     oidc_client_secret: bytes = field(repr=False)
     session_key: bytes = field(repr=False)
+    device_secret_root: Path
+    device_secret_key: bytes = field(repr=False)
+    device_secret_key_version: int
     policy_public_key_file: Path
     allowed_origins: tuple[str, ...]
     s3_endpoint: str
@@ -226,6 +254,9 @@ class ProductionSettings:
             oidc_client_id=_required(source, "SMART_ALARM_OIDC_CLIENT_ID"),
             oidc_client_secret=read_secret(source, "SMART_ALARM_OIDC_CLIENT_SECRET", minimum_bytes=16),
             session_key=read_secret(source, "SMART_ALARM_SESSION_KEY", minimum_bytes=32),
+            device_secret_root=_directory(source, "SMART_ALARM_DEVICE_SECRET_ROOT"),
+            device_secret_key=_device_secret_key(source),
+            device_secret_key_version=_integer(source, "SMART_ALARM_DEVICE_SECRET_KEY_VERSION", 1, 2147483647),
             policy_public_key_file=_readable_file(source, "SMART_ALARM_POLICY_PUBLIC_KEY_FILE"),
             allowed_origins=allowed_origins,
             s3_endpoint=_https_url(source, "SMART_ALARM_S3_ENDPOINT"),
@@ -276,6 +307,9 @@ class LocalSettings:
     valkey_ca_file: None = None
     oidc_issuer: None = None
     session_key: bytes = field(default=b"", repr=False)
+    device_secret_root: Path = Path(".")
+    device_secret_key: bytes = field(default=b"", repr=False)
+    device_secret_key_version: int = 1
     allowed_origins: tuple[str, ...] = ()
     database_tls: bool = False
     valkey_tls: bool = False
@@ -326,6 +360,9 @@ class LocalSettings:
             valkey_username=source.get("SMART_ALARM_VALKEY_USERNAME", "").strip() or None,
             valkey_password=valkey_password,
             session_key=read_secret(source, "SMART_ALARM_SESSION_KEY", minimum_bytes=32),
+            device_secret_root=_directory(source, "SMART_ALARM_DEVICE_SECRET_ROOT"),
+            device_secret_key=_device_secret_key(source),
+            device_secret_key_version=_integer(source, "SMART_ALARM_DEVICE_SECRET_KEY_VERSION", 1, 2147483647),
             allowed_origins=allowed_origins,
         )
 
