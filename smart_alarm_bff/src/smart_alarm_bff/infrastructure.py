@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import ssl
 from typing import Any
 
@@ -58,6 +59,7 @@ class Infrastructure:
                     user=self.settings.database_user,
                     password=self.settings.database_password.decode("utf-8"),
                     ssl=context,
+                    init=self._initialize_database_connection,
                     min_size=1,
                     max_size=20,
                     command_timeout=3,
@@ -68,6 +70,17 @@ class Infrastructure:
                     },
                 )
         return self._database_pool
+
+    @staticmethod
+    async def _initialize_database_connection(connection: asyncpg.Connection[Any]) -> None:
+        for type_name in ("json", "jsonb"):
+            await connection.set_type_codec(
+                type_name,
+                schema="pg_catalog",
+                encoder=json.dumps,
+                decoder=json.loads,
+                format="text",
+            )
 
     async def readiness(self) -> dict[str, object]:
         pending = [
