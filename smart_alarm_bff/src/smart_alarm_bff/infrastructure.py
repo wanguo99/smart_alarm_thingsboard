@@ -19,13 +19,13 @@ class Infrastructure:
         self.settings = settings
         self._database_pool: asyncpg.Pool[Any] | None = None
         self._database_lock = asyncio.Lock()
-        self._redis = Redis(
-            host=settings.redis_host,
-            port=settings.redis_port,
-            username=settings.redis_username,
-            password=settings.redis_password.decode("utf-8"),
+        self._valkey = Redis(
+            host=settings.valkey_host,
+            port=settings.valkey_port,
+            username=settings.valkey_username,
+            password=settings.valkey_password.decode("utf-8"),
             ssl=True,
-            ssl_ca_certs=str(settings.redis_ca_file),
+            ssl_ca_certs=str(settings.valkey_ca_file),
             decode_responses=False,
             socket_connect_timeout=2,
             socket_timeout=2,
@@ -37,7 +37,7 @@ class Infrastructure:
     async def close(self) -> None:
         await self._http.aclose()
         await self.thingsboard.close()
-        await self._redis.aclose()
+        await self._valkey.aclose()
         if self._database_pool is not None:
             await self._database_pool.close()
 
@@ -68,8 +68,8 @@ class Infrastructure:
     async def readiness(self) -> dict[str, object]:
         checks = await asyncio.gather(
             self._check_database(),
-            self._check_redis(),
-            self._check_http("thingsboard", f"{self.settings.thingsboard_url}/api/noauth/health"),
+            self._check_valkey(),
+            self._check_http("thingsboard", f"{self.settings.thingsboard_url}/actuator/info"),
             self._check_http("oidc", f"{self.settings.oidc_issuer}/.well-known/openid-configuration"),
         )
         dependencies = {name: status for name, status in checks}
@@ -85,12 +85,12 @@ class Infrastructure:
         except Exception as exc:  # dependency errors are reported without their secret-bearing detail
             return "postgresql", {"ready": False, "errorType": type(exc).__name__}
 
-    async def _check_redis(self) -> tuple[str, dict[str, object]]:
+    async def _check_valkey(self) -> tuple[str, dict[str, object]]:
         try:
-            ready = bool(await self._redis.ping())
-            return "redis", {"ready": ready}
+            ready = bool(await self._valkey.ping())
+            return "valkey", {"ready": ready}
         except Exception as exc:
-            return "redis", {"ready": False, "errorType": type(exc).__name__}
+            return "valkey", {"ready": False, "errorType": type(exc).__name__}
 
     async def _check_http(self, name: str, url: str) -> tuple[str, dict[str, object]]:
         try:

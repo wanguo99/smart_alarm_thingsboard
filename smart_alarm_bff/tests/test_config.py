@@ -32,12 +32,12 @@ class ProductionSettingsTest(unittest.TestCase):
             "SMART_ALARM_DATABASE_PASSWORD": "database-password-value",
             "SMART_ALARM_DATABASE_SSLMODE": "verify-full",
             "SMART_ALARM_DATABASE_CA_FILE": str(ca),
-            "SMART_ALARM_REDIS_HOST": "redis.internal",
-            "SMART_ALARM_REDIS_PORT": "6379",
-            "SMART_ALARM_REDIS_TLS": "true",
-            "SMART_ALARM_REDIS_USERNAME": "smart_alarm_app",
-            "SMART_ALARM_REDIS_PASSWORD": "redis-password-value",
-            "SMART_ALARM_REDIS_CA_FILE": str(ca),
+            "SMART_ALARM_VALKEY_HOST": "valkey.internal",
+            "SMART_ALARM_VALKEY_PORT": "6379",
+            "SMART_ALARM_VALKEY_TLS": "true",
+            "SMART_ALARM_VALKEY_USERNAME": "smart_alarm_app",
+            "SMART_ALARM_VALKEY_PASSWORD": "valkey-password-value",
+            "SMART_ALARM_VALKEY_CA_FILE": str(ca),
             "SMART_ALARM_OIDC_ISSUER": "https://id.example.com/realms/smart-alarm",
             "SMART_ALARM_OIDC_CLIENT_ID": "smart-alarm-web",
             "SMART_ALARM_OIDC_CLIENT_SECRET": "oidc-client-secret-value",
@@ -71,13 +71,20 @@ class ProductionSettingsTest(unittest.TestCase):
         self.assertEqual(settings.allowed_origins, ("https://alarm.example.com",))
         representation = repr(settings)
         self.assertNotIn("database-password-value", representation)
-        self.assertNotIn("redis-password-value", representation)
+        self.assertNotIn("valkey-password-value", representation)
         self.assertNotIn("key=secret", representation)
         self.assertNotIn("session_key", settings.public_summary())
 
     def test_rejects_insecure_transport(self) -> None:
         self.env["TB_HTTP_URL"] = "http://tb.example.com"
         with self.assertRaisesRegex(ConfigError, "TB_HTTP_URL must be an absolute HTTPS URL"):
+            ProductionSettings.from_env(self.env)
+
+    def test_does_not_accept_legacy_redis_environment_variables(self) -> None:
+        for suffix in ("HOST", "PORT", "TLS", "USERNAME", "PASSWORD", "CA_FILE"):
+            self.env[f"SMART_ALARM_REDIS_{suffix}"] = self.env.pop(f"SMART_ALARM_VALKEY_{suffix}")
+
+        with self.assertRaisesRegex(ConfigError, "SMART_ALARM_VALKEY_TLS is required"):
             ProductionSettings.from_env(self.env)
 
     def test_rejects_public_origin_missing_from_allowlist(self) -> None:

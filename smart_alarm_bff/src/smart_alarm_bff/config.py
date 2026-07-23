@@ -123,11 +123,11 @@ class ProductionSettings:
     database_user: str
     database_password: bytes = field(repr=False)
     database_ca_file: Path
-    redis_host: str
-    redis_port: int
-    redis_username: str
-    redis_password: bytes = field(repr=False)
-    redis_ca_file: Path
+    valkey_host: str
+    valkey_port: int
+    valkey_username: str
+    valkey_password: bytes = field(repr=False)
+    valkey_ca_file: Path
     oidc_issuer: str
     oidc_client_id: str
     oidc_client_secret: bytes = field(repr=False)
@@ -164,8 +164,8 @@ class ProductionSettings:
             raise ConfigError("TB_MQTT_TLS must be true in production")
         if _required(source, "SMART_ALARM_DATABASE_SSLMODE") != "verify-full":
             raise ConfigError("SMART_ALARM_DATABASE_SSLMODE must be verify-full")
-        if not _boolean(source, "SMART_ALARM_REDIS_TLS"):
-            raise ConfigError("SMART_ALARM_REDIS_TLS must be true in production")
+        if not _boolean(source, "SMART_ALARM_VALKEY_TLS"):
+            raise ConfigError("SMART_ALARM_VALKEY_TLS must be true in production")
         if not _boolean(source, "SMART_ALARM_SMTP_TLS"):
             raise ConfigError("SMART_ALARM_SMTP_TLS must be true in production")
         allowed_origins = _origins(source, "SMART_ALARM_ALLOWED_ORIGINS")
@@ -195,11 +195,11 @@ class ProductionSettings:
             database_user=_required(source, "SMART_ALARM_DATABASE_USER"),
             database_password=read_secret(source, "SMART_ALARM_DATABASE_PASSWORD", minimum_bytes=16),
             database_ca_file=_readable_file(source, "SMART_ALARM_DATABASE_CA_FILE"),
-            redis_host=_required(source, "SMART_ALARM_REDIS_HOST"),
-            redis_port=_port(source, "SMART_ALARM_REDIS_PORT"),
-            redis_username=_required(source, "SMART_ALARM_REDIS_USERNAME"),
-            redis_password=read_secret(source, "SMART_ALARM_REDIS_PASSWORD", minimum_bytes=16),
-            redis_ca_file=_readable_file(source, "SMART_ALARM_REDIS_CA_FILE"),
+            valkey_host=_required(source, "SMART_ALARM_VALKEY_HOST"),
+            valkey_port=_port(source, "SMART_ALARM_VALKEY_PORT"),
+            valkey_username=_required(source, "SMART_ALARM_VALKEY_USERNAME"),
+            valkey_password=read_secret(source, "SMART_ALARM_VALKEY_PASSWORD", minimum_bytes=16),
+            valkey_ca_file=_readable_file(source, "SMART_ALARM_VALKEY_CA_FILE"),
             oidc_issuer=_https_url(source, "SMART_ALARM_OIDC_ISSUER", allow_path=True),
             oidc_client_id=_required(source, "SMART_ALARM_OIDC_CLIENT_ID"),
             oidc_client_secret=read_secret(source, "SMART_ALARM_OIDC_CLIENT_SECRET", minimum_bytes=16),
