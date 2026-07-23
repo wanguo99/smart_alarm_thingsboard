@@ -156,7 +156,7 @@ def run() -> None:
     except ConfigError as exc:
         raise SystemExit(f"invalid runtime configuration: {exc}") from None
     uvicorn.run(
-        "smart_alarm_bff.main:create_app",
+        create_app,
         factory=True,
         host=settings.bind_host,
         port=9081,
