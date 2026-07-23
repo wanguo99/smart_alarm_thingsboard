@@ -32,7 +32,7 @@ class Infrastructure:
             health_check_interval=30,
         )
         self._http = httpx.AsyncClient(timeout=httpx.Timeout(3), follow_redirects=False)
-        self.thingsboard = ThingsBoardClient(settings.thingsboard_url)
+        self.thingsboard = ThingsBoardClient(settings.thingsboard_url, verify=str(settings.thingsboard_ca_file))
 
     async def close(self) -> None:
         await self._http.aclose()

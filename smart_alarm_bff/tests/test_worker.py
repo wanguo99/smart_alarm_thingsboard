@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from uuid import UUID
 
-from smart_alarm_bff.secret_provider import MountedSecretProvider, SecretReferenceError
+from smart_alarm_bff.secret_provider import EncryptedFileSecretStore, MountedSecretProvider, SecretReferenceError
 from smart_alarm_bff.worker import DeliveryError, OutboxEvent, OutboxRepository, OutboxWorker, retry_delay
 from smart_alarm_bff.worker_config import WorkerSettings
 
@@ -23,6 +24,8 @@ class WorkerConfigTest(unittest.TestCase):
                 "SMART_ALARM_ENVIRONMENT": "test",
                 "SMART_ALARM_DEPLOYMENT_COMMIT": "abcdef1",
                 "SMART_ALARM_WORKER_ID": "worker-1",
+                "TB_HTTP_URL": "https://tb.example.com",
+                "TB_HTTP_CA_FILE": str(ca),
                 "SMART_ALARM_DATABASE_HOST": "postgres.internal",
                 "SMART_ALARM_DATABASE_PORT": "5432",
                 "SMART_ALARM_DATABASE_NAME": "smart_alarm",
@@ -31,6 +34,9 @@ class WorkerConfigTest(unittest.TestCase):
                 "SMART_ALARM_DATABASE_SSLMODE": "verify-full",
                 "SMART_ALARM_DATABASE_CA_FILE": str(ca),
                 "SMART_ALARM_WORKER_SECRET_ROOT": str(secret_root),
+                "SMART_ALARM_DEVICE_SECRET_ROOT": str(secret_root),
+                "SMART_ALARM_DEVICE_SECRET_KEY": "k" * 32,
+                "SMART_ALARM_DEVICE_SECRET_KEY_VERSION": "1",
                 "SMART_ALARM_WORKER_BATCH_SIZE": "10",
                 "SMART_ALARM_WORKER_POLL_INTERVAL_MS": "500",
                 "SMART_ALARM_WORKER_LEASE_SECONDS": "30",
@@ -44,6 +50,8 @@ class WorkerConfigTest(unittest.TestCase):
             self.assertNotIn("worker-password-value", repr(settings))
             with self.assertRaisesRegex(ValueError, "lower than the lease"):
                 WorkerSettings.from_env({**env, "SMART_ALARM_WORKER_HANDLER_TIMEOUT_SECONDS": "30"})
+            with self.assertRaisesRegex(ValueError, "exactly 32 bytes"):
+                WorkerSettings.from_env({**env, "SMART_ALARM_DEVICE_SECRET_KEY": "k" * 33})
 
 
 class MountedSecretProviderTest(unittest.TestCase):
@@ -58,6 +66,44 @@ class MountedSecretProviderTest(unittest.TestCase):
             for reference in ("/etc/passwd", "mounted:../outside", "vault:tenant-1"):
                 with self.assertRaises(SecretReferenceError):
                     provider.read(reference)
+
+    def test_device_credentials_are_atomic_and_encrypted_at_rest(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = EncryptedFileSecretStore(root, b"k" * 32, 7)
+            reference, value = store.get_or_create("devices/tenant-1/device-1.bin", lambda: b"device-token")
+            self.assertEqual(reference, "encrypted:v7:devices/tenant-1/device-1.bin")
+            self.assertEqual(value, b"device-token")
+            self.assertEqual(store.read(reference), b"device-token")
+            self.assertNotIn(b"device-token", (root / "devices" / "tenant-1" / "device-1.bin").read_bytes())
+            second = store.get_or_create("devices/tenant-1/device-1.bin", lambda: b"different-token")
+            self.assertEqual(second, (reference, b"device-token"))
+            store.delete(reference)
+            store.delete(reference)
+            with self.assertRaises(SecretReferenceError):
+                store.read(reference)
+
+    def test_device_credentials_reject_symlink_escape_and_converge_under_concurrency(self) -> None:
+        with TemporaryDirectory() as directory, TemporaryDirectory() as outside_directory:
+            root = Path(directory)
+            outside = Path(outside_directory)
+            (root / "escaped").symlink_to(outside, target_is_directory=True)
+            store = EncryptedFileSecretStore(root, b"k" * 32, 1)
+            with self.assertRaises(SecretReferenceError):
+                store.get_or_create("escaped/device.bin", lambda: b"must-not-escape")
+            self.assertEqual(list(outside.iterdir()), [])
+
+            values = [f"token-{index}".encode("ascii") for index in range(8)]
+            with ThreadPoolExecutor(max_workers=len(values)) as executor:
+                results = list(executor.map(
+                    lambda value: store.get_or_create("devices/shared.bin", lambda: value),
+                    values,
+                ))
+            references = {reference for reference, _value in results}
+            stored_values = {value for _reference, value in results}
+            self.assertEqual(references, {"encrypted:v1:devices/shared.bin"})
+            self.assertEqual(len(stored_values), 1)
+            self.assertIn(next(iter(stored_values)), values)
 
 
 class WorkerKernelTest(unittest.TestCase):
@@ -80,6 +126,8 @@ class WorkerKernelTest(unittest.TestCase):
             environment="test",
             deployment_commit="abcdef1",
             worker_id="worker-1",
+            thingsboard_url="https://tb.example.com",
+            thingsboard_ca_file=Path("/tb-ca"),
             database_host="postgres.internal",
             database_port=5432,
             database_name="smart_alarm",
@@ -87,6 +135,9 @@ class WorkerKernelTest(unittest.TestCase):
             database_password=b"password-password",
             database_ca_file=Path("/ca"),
             secret_root=Path("/secrets"),
+            device_secret_root=Path("/device-secrets"),
+            device_secret_key=b"k" * 32,
+            device_secret_key_version=1,
             batch_size=10,
             poll_interval_ms=100,
             lease_seconds=30,

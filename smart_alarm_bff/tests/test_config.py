@@ -20,6 +20,7 @@ class ProductionSettingsTest(unittest.TestCase):
             "SMART_ALARM_DEPLOYMENT_COMMIT": "0123456789abcdef",
             "SMART_ALARM_PUBLIC_ORIGIN": "https://alarm.example.com",
             "TB_HTTP_URL": "https://tb.example.com",
+            "TB_HTTP_CA_FILE": str(ca),
             "TB_MQTT_HOST": "mqtt.example.com",
             "TB_MQTT_PORT": "8883",
             "TB_MQTT_TLS": "true",
@@ -98,4 +99,3 @@ class ProductionSettingsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

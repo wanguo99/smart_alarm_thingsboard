@@ -113,6 +113,7 @@ class ProductionSettings:
     deployment_commit: str
     public_origin: str
     thingsboard_url: str
+    thingsboard_ca_file: Path
     mqtt_host: str
     mqtt_port: int
     mqtt_ca_file: Path
@@ -184,6 +185,7 @@ class ProductionSettings:
             deployment_commit=commit,
             public_origin=public_origin,
             thingsboard_url=_https_url(source, "TB_HTTP_URL"),
+            thingsboard_ca_file=_readable_file(source, "TB_HTTP_CA_FILE"),
             mqtt_host=mqtt_host,
             mqtt_port=_port(source, "TB_MQTT_PORT"),
             mqtt_ca_file=_readable_file(source, "TB_MQTT_CA_FILE"),

@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 from typing import Mapping
 
-from .config import ConfigError, _COMMIT_PATTERN, _HOST_PATTERN, _port, _readable_file, _required, read_secret
+from .config import ConfigError, _COMMIT_PATTERN, _HOST_PATTERN, _https_url, _port, _readable_file, _required, read_secret
 
 
 _WORKER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$")
@@ -37,6 +37,8 @@ class WorkerSettings:
     environment: str
     deployment_commit: str
     worker_id: str
+    thingsboard_url: str
+    thingsboard_ca_file: Path
     database_host: str
     database_port: int
     database_name: str
@@ -44,6 +46,9 @@ class WorkerSettings:
     database_password: bytes = field(repr=False)
     database_ca_file: Path
     secret_root: Path
+    device_secret_root: Path
+    device_secret_key: bytes = field(repr=False)
+    device_secret_key_version: int
     batch_size: int
     poll_interval_ms: int
     lease_seconds: int
@@ -74,10 +79,15 @@ class WorkerSettings:
         max_backoff = _integer(source, "SMART_ALARM_WORKER_MAX_BACKOFF_SECONDS", 1, 86400)
         if initial_backoff > max_backoff:
             raise ConfigError("worker initial backoff must not exceed maximum backoff")
+        device_secret_key = read_secret(source, "SMART_ALARM_DEVICE_SECRET_KEY", minimum_bytes=32)
+        if len(device_secret_key) != 32:
+            raise ConfigError("SMART_ALARM_DEVICE_SECRET_KEY must contain exactly 32 bytes")
         return cls(
             environment=_required(source, "SMART_ALARM_ENVIRONMENT"),
             deployment_commit=commit,
             worker_id=worker_id,
+            thingsboard_url=_https_url(source, "TB_HTTP_URL"),
+            thingsboard_ca_file=_readable_file(source, "TB_HTTP_CA_FILE"),
             database_host=database_host,
             database_port=_port(source, "SMART_ALARM_DATABASE_PORT"),
             database_name=_required(source, "SMART_ALARM_DATABASE_NAME"),
@@ -85,6 +95,9 @@ class WorkerSettings:
             database_password=read_secret(source, "SMART_ALARM_WORKER_DATABASE_PASSWORD", minimum_bytes=16),
             database_ca_file=_readable_file(source, "SMART_ALARM_DATABASE_CA_FILE"),
             secret_root=_directory(source, "SMART_ALARM_WORKER_SECRET_ROOT"),
+            device_secret_root=_directory(source, "SMART_ALARM_DEVICE_SECRET_ROOT"),
+            device_secret_key=device_secret_key,
+            device_secret_key_version=_integer(source, "SMART_ALARM_DEVICE_SECRET_KEY_VERSION", 1, 2147483647),
             batch_size=_integer(source, "SMART_ALARM_WORKER_BATCH_SIZE", 1, 100),
             poll_interval_ms=_integer(source, "SMART_ALARM_WORKER_POLL_INTERVAL_MS", 100, 60000),
             lease_seconds=lease_seconds,

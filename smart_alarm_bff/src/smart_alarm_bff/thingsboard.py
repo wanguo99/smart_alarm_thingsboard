@@ -61,8 +61,8 @@ class ThingsBoardUser:
 
 
 class ThingsBoardClient:
-    def __init__(self, base_url: str) -> None:
-        self._client = httpx.AsyncClient(base_url=base_url, timeout=httpx.Timeout(5), follow_redirects=False)
+    def __init__(self, base_url: str, *, verify: str | bool = True) -> None:
+        self._client = httpx.AsyncClient(base_url=base_url, timeout=httpx.Timeout(5), follow_redirects=False, verify=verify)
 
     async def close(self) -> None:
         await self._client.aclose()
