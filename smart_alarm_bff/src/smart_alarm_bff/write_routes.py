@@ -93,7 +93,7 @@ async def _begin_operation(connection: Any, principal: ProductPrincipal, key: st
     )
     if existing is None or bytes(existing["request_hash"]) != request_hash:
         raise WriteError("idempotency_conflict", 409)
-    if existing["state"] == "SUCCEEDED":
+    if existing["state"] in {"QUEUED", "SUCCEEDED"} and _json_object(existing["result"]):
         return existing["id"], _json_object(existing["result"])
     raise WriteError("operation_in_progress", 409)
 
@@ -105,10 +105,36 @@ async def _finish_operation(connection: Any, operation_id: UUID, result: dict[st
     )
 
 
-async def _audit(connection: Any, principal: ProductPrincipal, request_id: str, action: str, resource_type: str, resource_id: str | None, detail: dict[str, object]) -> None:
+async def _queue_operation(connection: Any, operation_id: UUID, result: dict[str, object], resource_id: str | None = None) -> None:
+    await connection.execute(
+        "UPDATE smart_alarm.operations SET state = 'QUEUED', result = $2::jsonb, resource_id = $3, updated_at = clock_timestamp(), version = version + 1 WHERE id = $1",
+        operation_id, json.dumps(result, separators=(",", ":"), ensure_ascii=True), resource_id,
+    )
+
+
+async def _audit(connection: Any, principal: ProductPrincipal, request_id: str, action: str, resource_type: str, resource_id: str | None, detail: dict[str, object], outcome: str = "SUCCEEDED") -> None:
+    tenant_key = str(principal.internal_tenant_id) if principal.internal_tenant_id else "SYSTEM"
+    await connection.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", tenant_key)
     previous = await connection.fetchval(
         "SELECT event_hash FROM smart_alarm.audit_events WHERE tenant_id IS NOT DISTINCT FROM $1 ORDER BY id DESC LIMIT 1",
         principal.internal_tenant_id,
+    )
+    canonical = json.dumps({
+        "tenantId": str(principal.internal_tenant_id) if principal.internal_tenant_id else None,
+        "customerId": str(principal.internal_customer_id) if principal.internal_customer_id else None,
+        "actorUserId": str(principal.local_user_id),
+        "requestId": request_id,
+        "action": action,
+        "resourceType": resource_type,
+        "resourceId": resource_id,
+        "outcome": outcome,
+        "detail": detail,
+    }, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    event_hash = hashlib.sha256((bytes(previous) if previous else b"") + canonical).digest()
+    await connection.execute(
+        "INSERT INTO smart_alarm.audit_events (tenant_id, customer_id, actor_user_id, request_id, action, resource_type, resource_id, outcome, detail, previous_hash, event_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)",
+        principal.internal_tenant_id, principal.internal_customer_id, principal.local_user_id, request_id, action, resource_type, resource_id,
+        outcome, json.dumps(detail, separators=(",", ":"), ensure_ascii=True), previous, event_hash,
     )
 
 
@@ -116,13 +142,6 @@ async def _outbox(connection: Any, tenant_id: UUID | None, aggregate_type: str, 
     await connection.execute(
         "INSERT INTO smart_alarm.outbox_events (tenant_id, aggregate_type, aggregate_id, event_type, payload) VALUES ($1, $2, $3, $4, $5::jsonb)",
         tenant_id, aggregate_type, aggregate_id, event_type, json.dumps(payload, separators=(",", ":"), ensure_ascii=True),
-    )
-    canonical = json.dumps({"requestId": request_id, "action": action, "resourceType": resource_type, "resourceId": resource_id, "detail": detail}, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    event_hash = hashlib.sha256((bytes(previous) if previous else b"") + canonical).digest()
-    await connection.execute(
-        "INSERT INTO smart_alarm.audit_events (tenant_id, customer_id, actor_user_id, request_id, action, resource_type, resource_id, outcome, detail, previous_hash, event_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, 'SUCCEEDED', $8::jsonb, $9, $10)",
-        principal.internal_tenant_id, principal.internal_customer_id, principal.local_user_id, request_id, action, resource_type, resource_id,
-        json.dumps(detail, separators=(",", ":"), ensure_ascii=True), previous, event_hash,
     )
 
 
