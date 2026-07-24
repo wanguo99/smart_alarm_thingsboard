@@ -15,6 +15,7 @@ from prometheus_client import start_http_server
 from .config import ConfigError
 from .infrastructure import Infrastructure
 from .lifecycle_handlers import DeviceLifecycleHandlers
+from .platform_handlers import PlatformEntityHandlers
 from .secret_provider import EncryptedFileSecretStore, MountedSecretProvider
 from .thingsboard_admin import ThingsBoardAdminClient
 from .worker import OutboxRepository, OutboxWorker
@@ -81,7 +82,18 @@ async def run_worker(settings: WorkerSettings, stop: asyncio.Event | None = None
             thingsboard,
             settings.max_attempts,
         )
-        worker = OutboxWorker(settings, OutboxRepository(pool), handlers.mapping())
+        platform_handlers = PlatformEntityHandlers(
+            database,
+            settings.worker_id,
+            MountedSecretProvider(settings.secret_root),
+            thingsboard,
+            settings.max_attempts,
+        )
+        worker = OutboxWorker(
+            settings,
+            OutboxRepository(pool),
+            {**handlers.mapping(), **platform_handlers.mapping()},
+        )
         LOGGER.info("worker started", extra={"worker_id": settings.worker_id})
         await worker.run(stop_event)
         LOGGER.info("worker drained", extra={"worker_id": settings.worker_id})

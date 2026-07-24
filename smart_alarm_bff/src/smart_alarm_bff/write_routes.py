@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 
 from .directory_routes import DirectoryError, _error, _scoped_connection
 from .policy import PolicyError, ProductPrincipal
+from .platform_handlers import ASSET_SYNC_EVENT, PROFILE_SYNC_EVENT
 from .session import SessionContext, SessionError, SessionService
 from .thingsboard import ThingsBoardClient, ThingsBoardError, normalize_email, normalize_username
 
@@ -936,10 +937,19 @@ def register_write_routes(
                         raise WriteError("parent_asset_not_found", 404)
                     if parent["customer_id"] != customer_uuid:
                         raise WriteError("parent_asset_scope_mismatch", 404)
-                row = await connection.fetchrow("INSERT INTO smart_alarm.assets (tenant_id, customer_id, parent_asset_id, name, asset_type) VALUES ($1, $2, $3, $4, $5) RETURNING id, name, asset_type, customer_id", principal.internal_tenant_id, customer_uuid, parent_uuid, name, asset_type)
-                result = {"operationId": str(operation_id), "kind": "asset-create", "status": "SUCCEEDED", "asset": {"id": str(row["id"]), "name": row["name"], "type": row["asset_type"], "customerId": str(row["customer_id"]) if row["customer_id"] else None, "deviceCount": 0}}
-                await _finish_operation(connection, operation_id, result, str(row["id"]))
-                await _audit(connection, principal, key, "ASSET_CREATED", "ASSET", str(row["id"]), {"name": name})
+                row = await connection.fetchrow("INSERT INTO smart_alarm.assets (tenant_id, customer_id, parent_asset_id, name, asset_type, platform_sync_status) VALUES ($1, $2, $3, $4, $5, 'PENDING_CREATE') RETURNING id, name, asset_type, customer_id", principal.internal_tenant_id, customer_uuid, parent_uuid, name, asset_type)
+                if parent_uuid is not None:
+                    await connection.execute(
+                        """
+                        INSERT INTO smart_alarm.entity_relations (tenant_id, from_type, from_id, to_type, to_id, relation_type, status)
+                        VALUES ($1, 'ASSET', $2, 'ASSET', $3, 'Contains', 'PENDING_CREATE')
+                        """,
+                        principal.internal_tenant_id, parent_uuid, row["id"],
+                    )
+                result = {"operationId": str(operation_id), "kind": "asset-create", "status": "QUEUED", "asset": {"id": str(row["id"]), "name": row["name"], "type": row["asset_type"], "customerId": str(row["customer_id"]) if row["customer_id"] else None, "deviceCount": 0}}
+                await _queue_operation(connection, operation_id, result, str(row["id"]))
+                await _outbox(connection, principal.internal_tenant_id, "ASSET", str(row["id"]), ASSET_SYNC_EVENT, {"operationId": str(operation_id)})
+                await _audit(connection, principal, key, "ASSET_CREATED", "ASSET", str(row["id"]), {"name": name}, "ACCEPTED")
             return result
         except (WriteError, ValueError) as exc:
             return _write_error(exc if isinstance(exc, WriteError) else WriteError("invalid_request"))
@@ -951,9 +961,11 @@ def register_write_routes(
             tenant_id, session_customer = _tenant_scope(principal)
             asset_uuid, key = UUID(asset_id), _idempotency(request)
             async with _scoped_connection(await database(), principal) as connection:
-                current = await connection.fetchrow("SELECT id, name, asset_type, customer_id, parent_asset_id FROM smart_alarm.assets WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE' AND ($3::uuid IS NULL OR customer_id = $3)", tenant_id, asset_uuid, session_customer)
+                current = await connection.fetchrow("SELECT id, name, asset_type, customer_id, parent_asset_id, platform_sync_status, thingsboard_asset_id FROM smart_alarm.assets WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE' AND ($3::uuid IS NULL OR customer_id = $3)", tenant_id, asset_uuid, session_customer)
                 if current is None:
                     raise WriteError("not_found", 404)
+                if current["platform_sync_status"].startswith("PENDING_"):
+                    raise WriteError("asset_platform_sync_in_progress", 409)
                 name, asset_type = body.get("name", current["name"]), body.get("type", current["asset_type"])
                 raw_customer, raw_parent = body.get("customerId", current["customer_id"]), body.get("parentAssetId", current["parent_asset_id"])
                 customer_id = UUID(raw_customer) if isinstance(raw_customer, str) else raw_customer
@@ -971,10 +983,25 @@ def register_write_routes(
                 operation_id, replay = await _begin_operation(connection, principal, key, "asset-update", "ASSET", _body_hash({"assetId": asset_id, **body}))
                 if replay is not None:
                     return replay
-                row = await connection.fetchrow("UPDATE smart_alarm.assets SET name = $3, asset_type = $4, customer_id = $5, parent_asset_id = $6, version = version + 1, updated_at = clock_timestamp() WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE' RETURNING id, name, asset_type, customer_id", tenant_id, asset_uuid, name, asset_type, customer_id, parent_id)
-                result = {"operationId": str(operation_id), "kind": "asset-update", "status": "SUCCEEDED", "asset": {"id": str(row["id"]), "name": row["name"], "type": row["asset_type"], "customerId": str(row["customer_id"]) if row["customer_id"] else None, "deviceCount": 0}}
-                await _finish_operation(connection, operation_id, result, asset_id)
-                await _audit(connection, principal, key, "ASSET_UPDATED", "ASSET", asset_id, {"name": name})
+                next_sync = "PENDING_UPDATE" if current["thingsboard_asset_id"] is not None else "PENDING_CREATE"
+                row = await connection.fetchrow("UPDATE smart_alarm.assets SET name = $3, asset_type = $4, customer_id = $5, parent_asset_id = $6, platform_sync_status = $7, platform_error_code = NULL, version = version + 1, updated_at = clock_timestamp() WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE' RETURNING id, name, asset_type, customer_id", tenant_id, asset_uuid, name, asset_type, customer_id, parent_id, next_sync)
+                if current["parent_asset_id"] != parent_id:
+                    if current["parent_asset_id"] is not None:
+                        await connection.execute("UPDATE smart_alarm.entity_relations SET status = 'PENDING_DELETE', updated_at = clock_timestamp(), version = version + 1 WHERE tenant_id = $1 AND from_id = $2 AND to_type = 'ASSET' AND to_id = $3 AND relation_type = 'Contains'", tenant_id, current["parent_asset_id"], asset_uuid)
+                    if parent_id is not None:
+                        await connection.execute(
+                            """
+                            INSERT INTO smart_alarm.entity_relations (tenant_id, from_type, from_id, to_type, to_id, relation_type, status)
+                            VALUES ($1, 'ASSET', $2, 'ASSET', $3, 'Contains', 'PENDING_CREATE')
+                            ON CONFLICT (tenant_id, from_type, from_id, to_type, to_id, relation_type)
+                            DO UPDATE SET status = 'PENDING_CREATE', updated_at = clock_timestamp(), version = smart_alarm.entity_relations.version + 1
+                            """,
+                            tenant_id, parent_id, asset_uuid,
+                        )
+                result = {"operationId": str(operation_id), "kind": "asset-update", "status": "QUEUED", "asset": {"id": str(row["id"]), "name": row["name"], "type": row["asset_type"], "customerId": str(row["customer_id"]) if row["customer_id"] else None, "deviceCount": 0}}
+                await _queue_operation(connection, operation_id, result, asset_id)
+                await _outbox(connection, tenant_id, "ASSET", asset_id, ASSET_SYNC_EVENT, {"operationId": str(operation_id)})
+                await _audit(connection, principal, key, "ASSET_UPDATED", "ASSET", asset_id, {"name": name}, "ACCEPTED")
             return result
         except (WriteError, ValueError) as exc:
             return _write_error(exc if isinstance(exc, WriteError) else WriteError("invalid_request"))
@@ -989,14 +1016,26 @@ def register_write_routes(
                 operation_id, replay = await _begin_operation(connection, principal, key, "asset-archive", "ASSET", _body_hash({"assetId": asset_id}))
                 if replay is not None:
                     return replay
+                current = await connection.fetchrow("SELECT platform_sync_status, thingsboard_asset_id FROM smart_alarm.assets WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE' AND ($3::uuid IS NULL OR customer_id = $3)", tenant_id, asset_uuid, session_customer)
+                if current is None:
+                    raise WriteError("not_found", 404)
+                if current["platform_sync_status"].startswith("PENDING_"):
+                    raise WriteError("asset_platform_sync_in_progress", 409)
                 if await connection.fetchval("SELECT 1 FROM smart_alarm.assets WHERE tenant_id = $1 AND parent_asset_id = $2 AND status = 'ACTIVE' LIMIT 1", tenant_id, asset_uuid) == 1 or await connection.fetchval("SELECT 1 FROM smart_alarm.devices WHERE tenant_id = $1 AND asset_id = $2 AND lifecycle_state <> 'RETIRED' LIMIT 1", tenant_id, asset_uuid) == 1:
                     raise WriteError("asset_has_resources", 409)
-                row = await connection.fetchrow("UPDATE smart_alarm.assets SET status = 'ARCHIVED', archived_at = clock_timestamp(), version = version + 1, updated_at = clock_timestamp() WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE' AND ($3::uuid IS NULL OR customer_id = $3) RETURNING id, name, asset_type, customer_id", tenant_id, asset_uuid, session_customer)
+                next_sync = "PENDING_DELETE" if current["thingsboard_asset_id"] is not None else "SYNCED"
+                row = await connection.fetchrow("UPDATE smart_alarm.assets SET status = 'ARCHIVED', archived_at = clock_timestamp(), platform_sync_status = $3, version = version + 1, updated_at = clock_timestamp() WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE' AND ($4::uuid IS NULL OR customer_id = $4) RETURNING id, name, asset_type, customer_id", tenant_id, asset_uuid, next_sync, session_customer)
                 if row is None:
                     raise WriteError("not_found", 404)
-                result = {"operationId": str(operation_id), "kind": "asset-archive", "status": "SUCCEEDED", "asset": {"id": str(row["id"]), "name": row["name"], "type": row["asset_type"], "customerId": str(row["customer_id"]) if row["customer_id"] else None, "deviceCount": 0}}
-                await _finish_operation(connection, operation_id, result, asset_id)
-                await _audit(connection, principal, key, "ASSET_ARCHIVED", "ASSET", asset_id, {})
+                await connection.execute("UPDATE smart_alarm.entity_relations SET status = 'PENDING_DELETE', updated_at = clock_timestamp(), version = version + 1 WHERE tenant_id = $1 AND to_type = 'ASSET' AND to_id = $2 AND status = 'ACTIVE'", tenant_id, asset_uuid)
+                result = {"operationId": str(operation_id), "kind": "asset-archive", "status": "QUEUED", "asset": {"id": str(row["id"]), "name": row["name"], "type": row["asset_type"], "customerId": str(row["customer_id"]) if row["customer_id"] else None, "deviceCount": 0}}
+                await _queue_operation(connection, operation_id, result, asset_id)
+                if next_sync == "PENDING_DELETE":
+                    await _outbox(connection, tenant_id, "ASSET", asset_id, ASSET_SYNC_EVENT, {"operationId": str(operation_id)})
+                else:
+                    await connection.execute("DELETE FROM smart_alarm.entity_relations WHERE tenant_id = $1 AND to_type = 'ASSET' AND to_id = $2 AND status = 'PENDING_DELETE'", tenant_id, asset_uuid)
+                    await _finish_operation(connection, operation_id, {**result, "status": "SUCCEEDED"}, asset_id)
+                await _audit(connection, principal, key, "ASSET_ARCHIVED", "ASSET", asset_id, {}, "ACCEPTED")
             return result
         except (WriteError, ValueError) as exc:
             return _write_error(exc if isinstance(exc, WriteError) else WriteError("not_found", 404))
@@ -1008,7 +1047,7 @@ def register_write_routes(
             tenant_id, _ = _tenant_scope(principal)
             name = _name(body)
             profile_type, transport = body.get("type"), body.get("transportType")
-            if not isinstance(profile_type, str) or not profile_type or len(profile_type) > 64 or transport not in {"MQTT", "HTTP", "COAP", "LWM2M", "SNMP"}:
+            if not isinstance(profile_type, str) or not profile_type or len(profile_type) > 64 or transport not in {"DEFAULT", "MQTT"}:
                 raise WriteError("invalid_device_profile")
             is_default = body.get("isDefault", False)
             if not isinstance(is_default, bool):
@@ -1020,10 +1059,11 @@ def register_write_routes(
                     return replay
                 if is_default:
                     await connection.execute("UPDATE smart_alarm.device_profiles SET is_default = false, version = version + 1, updated_at = clock_timestamp() WHERE tenant_id = $1 AND is_default AND status = 'ACTIVE'", tenant_id)
-                row = await connection.fetchrow("INSERT INTO smart_alarm.device_profiles (tenant_id, name, profile_type, transport_type, is_default) VALUES ($1, $2, $3, $4, $5) RETURNING id, name, profile_type, transport_type, is_default", tenant_id, name, profile_type, transport, is_default)
-                result = {"operationId": str(operation_id), "kind": "device-profile-create", "status": "SUCCEEDED", "profile": {"id": str(row["id"]), "name": row["name"], "type": profile_type, "transportType": transport, "isDefault": row["is_default"]}}
-                await _finish_operation(connection, operation_id, result, str(row["id"]))
-                await _audit(connection, principal, key, "DEVICE_PROFILE_CREATED", "DEVICE_PROFILE", str(row["id"]), {"name": name})
+                row = await connection.fetchrow("INSERT INTO smart_alarm.device_profiles (tenant_id, name, profile_type, transport_type, is_default, platform_sync_status) VALUES ($1, $2, $3, $4, $5, 'PENDING_CREATE') RETURNING id, name, profile_type, transport_type, is_default", tenant_id, name, profile_type, transport, is_default)
+                result = {"operationId": str(operation_id), "kind": "device-profile-create", "status": "QUEUED", "profile": {"id": str(row["id"]), "name": row["name"], "type": profile_type, "transportType": transport, "isDefault": row["is_default"]}}
+                await _queue_operation(connection, operation_id, result, str(row["id"]))
+                await _outbox(connection, tenant_id, "DEVICE_PROFILE", str(row["id"]), PROFILE_SYNC_EVENT, {"operationId": str(operation_id)})
+                await _audit(connection, principal, key, "DEVICE_PROFILE_CREATED", "DEVICE_PROFILE", str(row["id"]), {"name": name}, "ACCEPTED")
             return result
         except (WriteError, ValueError) as exc:
             return _write_error(exc if isinstance(exc, WriteError) else WriteError("invalid_request"))
@@ -1036,23 +1076,29 @@ def register_write_routes(
             profile_uuid = UUID(profile_id)
             key = _idempotency(request)
             async with _scoped_connection(await database(), principal) as connection:
-                current = await connection.fetchrow("SELECT id, name, profile_type, transport_type, is_default FROM smart_alarm.device_profiles WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE'", tenant_id, profile_uuid)
+                current = await connection.fetchrow("SELECT id, name, profile_type, transport_type, is_default, platform_sync_status, thingsboard_profile_id FROM smart_alarm.device_profiles WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE'", tenant_id, profile_uuid)
                 if current is None:
                     raise WriteError("not_found", 404)
+                if current["platform_sync_status"].startswith("PENDING_"):
+                    raise WriteError("device_profile_platform_sync_in_progress", 409)
                 name = body.get("name", current["name"])
                 profile_type, transport = body.get("type", current["profile_type"]), body.get("transportType", current["transport_type"])
                 is_default = body.get("isDefault", current["is_default"])
-                if not isinstance(name, str) or not name or name != name.strip() or not isinstance(profile_type, str) or not profile_type or len(profile_type) > 64 or transport not in {"MQTT", "HTTP", "COAP", "LWM2M", "SNMP"} or not isinstance(is_default, bool):
+                if not isinstance(name, str) or not name or name != name.strip() or not isinstance(profile_type, str) or not profile_type or len(profile_type) > 64 or transport not in {"DEFAULT", "MQTT"} or not isinstance(is_default, bool):
                     raise WriteError("invalid_device_profile")
+                if current["is_default"] and not is_default:
+                    raise WriteError("default_device_profile_required", 409)
                 operation_id, replay = await _begin_operation(connection, principal, key, "device-profile-update", "DEVICE_PROFILE", _body_hash({"profileId": profile_id, **body}))
                 if replay is not None:
                     return replay
                 if is_default:
                     await connection.execute("UPDATE smart_alarm.device_profiles SET is_default = false, version = version + 1, updated_at = clock_timestamp() WHERE tenant_id = $1 AND id <> $2 AND is_default AND status = 'ACTIVE'", tenant_id, profile_uuid)
-                row = await connection.fetchrow("UPDATE smart_alarm.device_profiles SET name = $3, profile_type = $4, transport_type = $5, is_default = $6, version = version + 1, updated_at = clock_timestamp() WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE' RETURNING id, name, profile_type, transport_type, is_default", tenant_id, profile_uuid, name, profile_type, transport, is_default)
-                result = {"operationId": str(operation_id), "kind": "device-profile-update", "status": "SUCCEEDED", "profile": {"id": str(row["id"]), "name": row["name"], "type": profile_type, "transportType": transport, "isDefault": row["is_default"]}}
-                await _finish_operation(connection, operation_id, result, profile_id)
-                await _audit(connection, principal, key, "DEVICE_PROFILE_UPDATED", "DEVICE_PROFILE", profile_id, {"name": name})
+                next_sync = "PENDING_UPDATE" if current["thingsboard_profile_id"] is not None else "PENDING_CREATE"
+                row = await connection.fetchrow("UPDATE smart_alarm.device_profiles SET name = $3, profile_type = $4, transport_type = $5, is_default = $6, platform_sync_status = $7, platform_error_code = NULL, version = version + 1, updated_at = clock_timestamp() WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE' RETURNING id, name, profile_type, transport_type, is_default", tenant_id, profile_uuid, name, profile_type, transport, is_default, next_sync)
+                result = {"operationId": str(operation_id), "kind": "device-profile-update", "status": "QUEUED", "profile": {"id": str(row["id"]), "name": row["name"], "type": profile_type, "transportType": transport, "isDefault": row["is_default"]}}
+                await _queue_operation(connection, operation_id, result, profile_id)
+                await _outbox(connection, tenant_id, "DEVICE_PROFILE", profile_id, PROFILE_SYNC_EVENT, {"operationId": str(operation_id)})
+                await _audit(connection, principal, key, "DEVICE_PROFILE_UPDATED", "DEVICE_PROFILE", profile_id, {"name": name}, "ACCEPTED")
             return result
         except (WriteError, ValueError) as exc:
             return _write_error(exc if isinstance(exc, WriteError) else WriteError("not_found", 404))
@@ -1068,14 +1114,26 @@ def register_write_routes(
                 operation_id, replay = await _begin_operation(connection, principal, key, "device-profile-archive", "DEVICE_PROFILE", _body_hash({"profileId": profile_id}))
                 if replay is not None:
                     return replay
+                current = await connection.fetchrow("SELECT name, profile_type, transport_type, is_default, platform_sync_status, thingsboard_profile_id FROM smart_alarm.device_profiles WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE'", tenant_id, profile_uuid)
+                if current is None:
+                    raise WriteError("not_found", 404)
+                if current["platform_sync_status"].startswith("PENDING_"):
+                    raise WriteError("device_profile_platform_sync_in_progress", 409)
+                if current["is_default"]:
+                    raise WriteError("default_device_profile_required", 409)
                 if await connection.fetchval("SELECT 1 FROM smart_alarm.devices WHERE tenant_id = $1 AND device_profile_id = $2 AND lifecycle_state <> 'RETIRED'", tenant_id, profile_uuid) == 1:
                     raise WriteError("profile_in_use", 409)
-                row = await connection.fetchrow("UPDATE smart_alarm.device_profiles SET status = 'ARCHIVED', archived_at = clock_timestamp(), version = version + 1, updated_at = clock_timestamp() WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE' RETURNING id, name, profile_type, transport_type", tenant_id, profile_uuid)
+                next_sync = "PENDING_DELETE" if current["thingsboard_profile_id"] is not None else "SYNCED"
+                row = await connection.fetchrow("UPDATE smart_alarm.device_profiles SET status = 'ARCHIVED', archived_at = clock_timestamp(), platform_sync_status = $3, version = version + 1, updated_at = clock_timestamp() WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE' RETURNING id, name, profile_type, transport_type", tenant_id, profile_uuid, next_sync)
                 if row is None:
                     raise WriteError("not_found", 404)
-                result = {"operationId": str(operation_id), "kind": "device-profile-archive", "status": "SUCCEEDED", "profile": {"id": str(row["id"]), "name": row["name"], "type": row["profile_type"], "transportType": row["transport_type"], "isDefault": False}}
-                await _finish_operation(connection, operation_id, result, profile_id)
-                await _audit(connection, principal, key, "DEVICE_PROFILE_ARCHIVED", "DEVICE_PROFILE", profile_id, {})
+                result = {"operationId": str(operation_id), "kind": "device-profile-archive", "status": "QUEUED", "profile": {"id": str(row["id"]), "name": row["name"], "type": row["profile_type"], "transportType": row["transport_type"], "isDefault": False}}
+                await _queue_operation(connection, operation_id, result, profile_id)
+                if next_sync == "PENDING_DELETE":
+                    await _outbox(connection, tenant_id, "DEVICE_PROFILE", profile_id, PROFILE_SYNC_EVENT, {"operationId": str(operation_id)})
+                else:
+                    await _finish_operation(connection, operation_id, {**result, "status": "SUCCEEDED"}, profile_id)
+                await _audit(connection, principal, key, "DEVICE_PROFILE_ARCHIVED", "DEVICE_PROFILE", profile_id, {}, "ACCEPTED")
             return result
         except (WriteError, ValueError) as exc:
             return _write_error(exc if isinstance(exc, WriteError) else WriteError("not_found", 404))

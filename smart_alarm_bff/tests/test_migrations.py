@@ -10,7 +10,7 @@ class MigrationContractTest(unittest.TestCase):
     def test_initial_schema_covers_production_control_plane(self) -> None:
         directory = Path(__file__).resolve().parents[1] / "migrations"
         migrations = load_migrations(directory)
-        self.assertEqual([item[0] for item in migrations], ["0001_initial.sql", "0002_seed_product_roles.sql", "0003_allow_system_scope_records.sql", "0004_system_scope_rls.sql", "0005_device_profile_metadata.sql", "0006_async_device_lifecycle.sql", "0007_outbox_fencing.sql", "0008_usernames.sql", "0009_device_activation_grants.sql", "0010_retired_device_credentials.sql", "0011_operation_retry_chain.sql"])
+        self.assertEqual([item[0] for item in migrations], ["0001_initial.sql", "0002_seed_product_roles.sql", "0003_allow_system_scope_records.sql", "0004_system_scope_rls.sql", "0005_device_profile_metadata.sql", "0006_async_device_lifecycle.sql", "0007_outbox_fencing.sql", "0008_usernames.sql", "0009_device_activation_grants.sql", "0010_retired_device_credentials.sql", "0011_operation_retry_chain.sql", "0012_platform_entity_sync.sql"])
         sql = migrations[0][2]
         for table in (
             "tenants",
@@ -67,6 +67,13 @@ class MigrationContractTest(unittest.TestCase):
         migration = load_migrations(directory)[4][2]
         self.assertIn("profile_type", migration)
         self.assertIn("transport_type", migration)
+
+    def test_platform_entity_sync_state_is_explicit(self) -> None:
+        directory = Path(__file__).resolve().parents[1] / "migrations"
+        migration = load_migrations(directory)[11][2]
+        self.assertIn("platform_sync_status", migration)
+        self.assertIn("LOCAL_ONLY", migration)
+        self.assertIn("assets_platform_sync_idx", migration)
 
     def test_device_activation_can_wait_for_outbox_worker(self) -> None:
         directory = Path(__file__).resolve().parents[1] / "migrations"

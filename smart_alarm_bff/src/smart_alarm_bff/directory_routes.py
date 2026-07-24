@@ -163,7 +163,7 @@ def register_directory_routes(router: APIRouter, sessions: SessionService, datab
             async with _scoped_connection(await database(), principal) as connection:
                 rows = await connection.fetch(
                     """
-                    SELECT a.id, a.name, a.asset_type, a.customer_id,
+                    SELECT a.id, a.name, a.asset_type, a.customer_id, a.platform_sync_status, a.platform_error_code,
                            (SELECT count(*) FROM smart_alarm.entity_relations r WHERE r.tenant_id = a.tenant_id AND r.from_type = 'ASSET' AND r.from_id = a.id AND r.to_type = 'DEVICE' AND r.status = 'ACTIVE') AS device_count
                     FROM smart_alarm.assets a
                     WHERE a.tenant_id = $1 AND a.status = 'ACTIVE'
@@ -172,7 +172,7 @@ def register_directory_routes(router: APIRouter, sessions: SessionService, datab
                     """,
                     tenant_id, customer_id,
                 )
-            return _page([{"id": str(row["id"]), "name": row["name"], "type": row["asset_type"], "customerId": str(row["customer_id"]) if row["customer_id"] else None, "deviceCount": int(row["device_count"])} for row in rows])
+            return _page([{"id": str(row["id"]), "name": row["name"], "type": row["asset_type"], "customerId": str(row["customer_id"]) if row["customer_id"] else None, "deviceCount": int(row["device_count"]), "platformSyncStatus": row["platform_sync_status"], "platformErrorCode": row["platform_error_code"]} for row in rows])
         except DirectoryError as exc:
             return _error(exc)
 
@@ -185,12 +185,12 @@ def register_directory_routes(router: APIRouter, sessions: SessionService, datab
             asset_uuid = UUID(asset_id)
             async with _scoped_connection(await database(), principal) as connection:
                 row = await connection.fetchrow(
-                    "SELECT a.id, a.name, a.asset_type, a.customer_id, (SELECT count(*) FROM smart_alarm.entity_relations r WHERE r.tenant_id = a.tenant_id AND r.from_type = 'ASSET' AND r.from_id = a.id AND r.to_type = 'DEVICE' AND r.status = 'ACTIVE') AS device_count FROM smart_alarm.assets a WHERE a.tenant_id = $1 AND a.id = $2 AND a.status = 'ACTIVE' AND ($3::uuid IS NULL OR a.customer_id = $3)",
+                    "SELECT a.id, a.name, a.asset_type, a.customer_id, a.platform_sync_status, a.platform_error_code, (SELECT count(*) FROM smart_alarm.entity_relations r WHERE r.tenant_id = a.tenant_id AND r.from_type = 'ASSET' AND r.from_id = a.id AND r.to_type = 'DEVICE' AND r.status = 'ACTIVE') AS device_count FROM smart_alarm.assets a WHERE a.tenant_id = $1 AND a.id = $2 AND a.status = 'ACTIVE' AND ($3::uuid IS NULL OR a.customer_id = $3)",
                     tenant_id, asset_uuid, customer_id,
                 )
             if row is None:
                 raise DirectoryError("not_found", 404)
-            return {"id": str(row["id"]), "name": row["name"], "type": row["asset_type"], "customerId": str(row["customer_id"]) if row["customer_id"] else None, "deviceCount": int(row["device_count"])}
+            return {"id": str(row["id"]), "name": row["name"], "type": row["asset_type"], "customerId": str(row["customer_id"]) if row["customer_id"] else None, "deviceCount": int(row["device_count"]), "platformSyncStatus": row["platform_sync_status"], "platformErrorCode": row["platform_error_code"]}
         except (DirectoryError, ValueError) as exc:
             return _error(exc if isinstance(exc, DirectoryError) else DirectoryError("not_found", 404))
 
@@ -205,9 +205,9 @@ def register_directory_routes(router: APIRouter, sessions: SessionService, datab
                 asset = await connection.fetchrow("SELECT id FROM smart_alarm.assets WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE' AND ($3::uuid IS NULL OR customer_id = $3)", tenant_id, asset_uuid, customer_id)
                 if asset is None:
                     raise DirectoryError("not_found", 404)
-                children = await connection.fetch("SELECT id, name, asset_type, customer_id, 0::bigint AS device_count FROM smart_alarm.assets WHERE tenant_id = $1 AND parent_asset_id = $2 AND status = 'ACTIVE' ORDER BY lower(name), id", tenant_id, asset_uuid)
+                children = await connection.fetch("SELECT id, name, asset_type, customer_id, platform_sync_status, platform_error_code, 0::bigint AS device_count FROM smart_alarm.assets WHERE tenant_id = $1 AND parent_asset_id = $2 AND status = 'ACTIVE' ORDER BY lower(name), id", tenant_id, asset_uuid)
                 devices = await connection.fetch("SELECT d.device_uid, d.display_name FROM smart_alarm.entity_relations r JOIN smart_alarm.devices d ON d.tenant_id = r.tenant_id AND d.id = r.to_id WHERE r.tenant_id = $1 AND r.from_id = $2 AND r.from_type = 'ASSET' AND r.to_type = 'DEVICE' AND r.status = 'ACTIVE' AND d.lifecycle_state <> 'RETIRED'", tenant_id, asset_uuid)
-            return {"assetId": asset_id, "children": _page([{"id": str(row["id"]), "name": row["name"], "type": row["asset_type"], "customerId": str(row["customer_id"]) if row["customer_id"] else None, "deviceCount": int(row["device_count"])} for row in children])["data"], "devices": [{"deviceUid": str(row["device_uid"]), "name": row["display_name"]} for row in devices]}
+            return {"assetId": asset_id, "children": _page([{"id": str(row["id"]), "name": row["name"], "type": row["asset_type"], "customerId": str(row["customer_id"]) if row["customer_id"] else None, "deviceCount": int(row["device_count"]), "platformSyncStatus": row["platform_sync_status"], "platformErrorCode": row["platform_error_code"]} for row in children])["data"], "devices": [{"deviceUid": str(row["device_uid"]), "name": row["display_name"]} for row in devices]}
         except (DirectoryError, ValueError) as exc:
             return _error(exc if isinstance(exc, DirectoryError) else DirectoryError("not_found", 404))
 
@@ -235,8 +235,8 @@ def register_directory_routes(router: APIRouter, sessions: SessionService, datab
             _require(principal, "device-profiles:read")
             tenant_id, _ = _tenant_args(principal)
             async with _scoped_connection(await database(), principal) as connection:
-                rows = await connection.fetch("SELECT id, name, profile_type AS type, transport_type, is_default FROM smart_alarm.device_profiles WHERE tenant_id = $1 AND status = 'ACTIVE' ORDER BY is_default DESC, lower(name), id", tenant_id)
-            data = [{"id": str(row["id"]), "name": row["name"], "type": row["type"], "transportType": row["transport_type"], "isDefault": row["is_default"]} for row in rows]
+                rows = await connection.fetch("SELECT id, name, profile_type AS type, transport_type, is_default, platform_sync_status, platform_error_code FROM smart_alarm.device_profiles WHERE tenant_id = $1 AND status = 'ACTIVE' ORDER BY is_default DESC, lower(name), id", tenant_id)
+            data = [{"id": str(row["id"]), "name": row["name"], "type": row["type"], "transportType": row["transport_type"], "isDefault": row["is_default"], "platformSyncStatus": row["platform_sync_status"], "platformErrorCode": row["platform_error_code"]} for row in rows]
             return {"source": "local", **_page(data)}
         except DirectoryError as exc:
             return _error(exc)

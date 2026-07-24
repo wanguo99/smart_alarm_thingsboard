@@ -249,13 +249,19 @@ class ThingsBoardAdminClient:
             existing = await self.find_asset_by_name(token, name)
             if existing is not None:
                 self.verify_asset_uid(existing, asset_uid)
-                return existing
+                result = existing
+                if customer_id is not None:
+                    await self.assign_asset(token, customer_id, result["uuid"])
+                return result
             raise
         if response.status_code != 200:
             existing = await self.find_asset_by_name(token, name)
             if existing is not None:
                 self.verify_asset_uid(existing, asset_uid)
-                return existing
+                result = existing
+                if customer_id is not None:
+                    await self.assign_asset(token, customer_id, result["uuid"])
+                return result
         self._expect(response, {200}, "thingsboard_asset_create_failed")
         result = _asset(response.json())
         self.verify_asset_uid(result, asset_uid)
@@ -274,6 +280,14 @@ class ThingsBoardAdminClient:
         response = await self._authorized("GET", f"/api/asset/{asset_id}", token)
         self._expect(response, {200}, "thingsboard_asset_read_failed")
         return _asset(response.json())
+
+    @staticmethod
+    def asset_customer_id(asset: dict[str, object]) -> UUID | None:
+        customer = asset.get("customerId")
+        if not isinstance(customer, dict) or customer.get("entityType") != "CUSTOMER":
+            raise PlatformAdminError("invalid_platform_asset_response", retryable=False)
+        customer_id = _entity_uuid(customer)
+        return None if customer_id in {UUID(int=0), THINGSBOARD_NULL_UUID} else customer_id
 
     async def update_asset(
         self,
@@ -336,21 +350,13 @@ class ThingsBoardAdminClient:
         profile_uid: UUID,
         is_default: bool,
     ) -> dict[str, object]:
-        transport: dict[str, object] = {"type": transport_type}
-        if transport_type == "MQTT":
-            transport.update({
-                "deviceTelemetryTopic": "v1/devices/me/telemetry",
-                "deviceAttributesTopic": "v1/devices/me/attributes",
-                "deviceAttributesSubscribeTopic": "v1/devices/me/attributes",
-                "transportPayloadTypeConfiguration": {"transportPayloadType": "JSON"},
-                "sendAckOnValidationException": False,
-            })
+        transport = self._profile_transport(transport_type)
         payload = {
             "name": name,
             "type": "DEFAULT",
             "transportType": transport_type,
             "description": f"Smart Alarm profile {profile_uid}",
-            "default": is_default,
+            "default": False,
             "profileData": {
                 "configuration": {"type": "DEFAULT"},
                 "transportConfiguration": transport,
@@ -358,7 +364,16 @@ class ThingsBoardAdminClient:
                 "alarms": [],
             },
         }
-        response = await self._authorized("POST", "/api/deviceProfile", token, json=payload)
+        try:
+            response = await self._authorized("POST", "/api/deviceProfile", token, json=payload)
+        except PlatformAdminError as exc:
+            if not exc.retryable:
+                raise
+            existing = await self.find_device_profile_by_name(token, name)
+            if existing is not None:
+                self.verify_profile_uid(existing, profile_uid)
+                return existing
+            raise
         if response.status_code != 200:
             existing = await self.find_device_profile_by_name(token, name)
             if existing is not None:
@@ -405,7 +420,17 @@ class ThingsBoardAdminClient:
         current = await self.get_device_profile(token, profile_id)
         self.verify_profile_uid(current, profile_uid)
         payload = {key: value for key, value in current.items() if key != "uuid"}
-        payload.update({"name": name, "type": "DEFAULT", "transportType": transport_type, "default": is_default})
+        profile_data = payload.get("profileData")
+        if not isinstance(profile_data, dict):
+            raise PlatformAdminError("invalid_platform_profile_response", retryable=False)
+        profile_data = dict(profile_data)
+        profile_data["transportConfiguration"] = self._profile_transport(transport_type)
+        payload.update({
+            "name": name,
+            "type": "DEFAULT",
+            "transportType": transport_type,
+            "profileData": profile_data,
+        })
         response = await self._authorized("POST", "/api/deviceProfile", token, json=payload)
         self._expect(response, {200}, "thingsboard_profile_update_failed")
         result = _profile(response.json())
@@ -434,6 +459,21 @@ class ThingsBoardAdminClient:
         description = profile.get("description")
         if description != f"Smart Alarm profile {expected}":
             raise PlatformAdminError("thingsboard_profile_identity_conflict", retryable=False)
+
+    @staticmethod
+    def _profile_transport(transport_type: str) -> dict[str, object]:
+        if transport_type == "DEFAULT":
+            return {"type": "DEFAULT"}
+        if transport_type == "MQTT":
+            return {
+                "type": "MQTT",
+                "deviceTelemetryTopic": "v1/devices/me/telemetry",
+                "deviceAttributesTopic": "v1/devices/me/attributes",
+                "deviceAttributesSubscribeTopic": "v1/devices/me/attributes",
+                "transportPayloadTypeConfiguration": {"transportPayloadType": "JSON"},
+                "sendAckOnValidationException": False,
+            }
+        raise PlatformAdminError("unsupported_profile_transport", retryable=False)
 
     async def delete_device(self, token: str, device_id: UUID) -> None:
         response = await self._authorized("DELETE", f"/api/device/{device_id}", token)

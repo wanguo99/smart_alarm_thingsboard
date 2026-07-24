@@ -85,8 +85,8 @@ async def _validate_assignments(connection: Any, tenant_id: UUID, customer_id: U
     if customer_id is not None and await connection.fetchval("SELECT 1 FROM smart_alarm.customers WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE'", tenant_id, customer_id) != 1:
         raise WriteError("customer_not_found", 404)
     if asset_id is not None:
-        asset = await connection.fetchrow("SELECT customer_id FROM smart_alarm.assets WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE'", tenant_id, asset_id)
-        if asset is None or asset["customer_id"] != customer_id:
+        asset = await connection.fetchrow("SELECT customer_id, platform_sync_status FROM smart_alarm.assets WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE'", tenant_id, asset_id)
+        if asset is None or asset["customer_id"] != customer_id or asset["platform_sync_status"] != "SYNCED":
             raise WriteError("asset_scope_mismatch", 404)
     if group_id is not None:
         group = await connection.fetchrow("SELECT customer_id FROM smart_alarm.business_groups WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE'", tenant_id, group_id)
@@ -377,8 +377,8 @@ def register_device_routes(router: APIRouter, sessions: SessionService, database
                 if await connection.fetchval("SELECT $1 <= clock_timestamp()", inventory["claim_expires_at"]):
                     raise WriteError("claim_expired", 409)
                 if profile_id is None:
-                    profile_id = await connection.fetchval("SELECT id FROM smart_alarm.device_profiles WHERE tenant_id = $1 AND status = 'ACTIVE' ORDER BY is_default DESC, created_at, id LIMIT 1", tenant_id)
-                if profile_id is None or await connection.fetchval("SELECT 1 FROM smart_alarm.device_profiles WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE'", tenant_id, profile_id) != 1:
+                    profile_id = await connection.fetchval("SELECT id FROM smart_alarm.device_profiles WHERE tenant_id = $1 AND status = 'ACTIVE' AND platform_sync_status = 'SYNCED' ORDER BY is_default DESC, created_at, id LIMIT 1", tenant_id)
+                if profile_id is None or await connection.fetchval("SELECT 1 FROM smart_alarm.device_profiles WHERE tenant_id = $1 AND id = $2 AND status = 'ACTIVE' AND platform_sync_status = 'SYNCED'", tenant_id, profile_id) != 1:
                     raise WriteError("device_profile_not_found", 404)
                 await _validate_assignments(connection, tenant_id, customer_id, asset_id, group_id)
                 await connection.execute("UPDATE smart_alarm.device_inventory SET status = 'CLAIMED', claim_consumed_at = clock_timestamp(), updated_at = clock_timestamp() WHERE device_uid = $1", device_uid)
