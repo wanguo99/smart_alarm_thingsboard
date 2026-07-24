@@ -205,6 +205,21 @@ class ThingsBoardAdminClient:
         self._expect(response, {200}, "thingsboard_device_update_failed")
         return _device(response.json())
 
+    async def set_inactivity_timeout(self, token: str, device_id: UUID, timeout_ms: int) -> None:
+        if (
+            not isinstance(timeout_ms, int)
+            or isinstance(timeout_ms, bool)
+            or not 30_000 <= timeout_ms <= 3_600_000
+        ):
+            raise ValueError("device inactivity timeout must be between 30000 and 3600000 milliseconds")
+        response = await self._authorized(
+            "POST",
+            f"/api/plugins/telemetry/DEVICE/{device_id}/SERVER_SCOPE",
+            token,
+            json={"inactivityTimeout": timeout_ms},
+        )
+        self._expect(response, {200}, "thingsboard_inactivity_timeout_update_failed")
+
     @staticmethod
     def device_customer_id(device: dict[str, object]) -> UUID | None:
         customer = device.get("customerId")

@@ -144,6 +144,13 @@ class LifecycleHandlerContractTest(unittest.TestCase):
                 object(), "worker-1", object(), object(), object(), max_attempts=0,  # type: ignore[arg-type]
             )
 
+    def test_handler_rejects_invalid_device_inactivity_timeout(self) -> None:
+        with self.assertRaisesRegex(ValueError, "inactivity_timeout_ms"):
+            DeviceLifecycleHandlers(
+                object(), "worker-1", object(), object(), object(),  # type: ignore[arg-type]
+                inactivity_timeout_ms=1_000,
+            )
+
     def test_customer_sync_skips_unassignment_when_platform_is_already_unassigned(self) -> None:
         async def scenario() -> tuple[AsyncMock, AsyncMock]:
             platform = SimpleNamespace(

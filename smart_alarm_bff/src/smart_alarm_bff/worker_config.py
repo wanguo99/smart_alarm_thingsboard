@@ -60,6 +60,7 @@ class WorkerSettings:
     device_secret_root: Path
     device_secret_key: bytes = field(repr=False)
     device_secret_key_version: int
+    device_inactivity_timeout_ms: int
     batch_size: int
     poll_interval_ms: int
     lease_seconds: int
@@ -120,6 +121,9 @@ class WorkerSettings:
             device_secret_root=_directory(source, "SMART_ALARM_DEVICE_SECRET_ROOT"),
             device_secret_key=device_secret_key,
             device_secret_key_version=_integer(source, "SMART_ALARM_DEVICE_SECRET_KEY_VERSION", 1, 2147483647),
+            device_inactivity_timeout_ms=_integer(
+                source, "SMART_ALARM_DEVICE_INACTIVITY_TIMEOUT_MS", 30_000, 3_600_000,
+            ),
             batch_size=_integer(source, "SMART_ALARM_WORKER_BATCH_SIZE", 1, 100),
             poll_interval_ms=_integer(source, "SMART_ALARM_WORKER_POLL_INTERVAL_MS", 100, 60000),
             lease_seconds=lease_seconds,

@@ -200,6 +200,28 @@ class ThingsBoardAdminClientTest(unittest.TestCase):
         self.assertEqual(json.loads(requests[4].content)["from"], entity(ASSET_ID, "ASSET"))
         self.assertEqual(requests[5].url.params["relationTypeGroup"], "COMMON")
 
+    def test_device_inactivity_timeout_uses_server_scope_attribute(self) -> None:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200)
+
+        self.execute_scenario(
+            handler,
+            lambda client: client.set_inactivity_timeout("service.jwt", DEVICE_ID, 90_000),
+        )
+        self.assertEqual(
+            requests[0].url.path,
+            f"/api/plugins/telemetry/DEVICE/{DEVICE_ID}/SERVER_SCOPE",
+        )
+        self.assertEqual(json.loads(requests[0].content), {"inactivityTimeout": 90_000})
+        with self.assertRaisesRegex(ValueError, "device inactivity timeout"):
+            self.execute_scenario(
+                handler,
+                lambda client: client.set_inactivity_timeout("service.jwt", DEVICE_ID, 1_000),
+            )
+
     def test_asset_crud_assignment_and_relation_contracts(self) -> None:
         requests: list[httpx.Request] = []
 

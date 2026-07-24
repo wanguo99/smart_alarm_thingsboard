@@ -40,6 +40,7 @@ class WorkerConfigTest(unittest.TestCase):
                 "SMART_ALARM_DEVICE_SECRET_ROOT": str(secret_root),
                 "SMART_ALARM_DEVICE_SECRET_KEY": "k" * 32,
                 "SMART_ALARM_DEVICE_SECRET_KEY_VERSION": "1",
+                "SMART_ALARM_DEVICE_INACTIVITY_TIMEOUT_MS": "90000",
                 "SMART_ALARM_WORKER_BATCH_SIZE": "10",
                 "SMART_ALARM_WORKER_POLL_INTERVAL_MS": "500",
                 "SMART_ALARM_WORKER_LEASE_SECONDS": "30",
@@ -51,6 +52,7 @@ class WorkerConfigTest(unittest.TestCase):
             }
             settings = WorkerSettings.from_env(env)
             self.assertEqual(settings.database_user, "smart_alarm_worker")
+            self.assertEqual(settings.device_inactivity_timeout_ms, 90_000)
             self.assertTrue(settings.database_tls)
             self.assertNotIn("worker-password-value", repr(settings))
             with self.assertRaisesRegex(ValueError, "lower than the lease"):
@@ -75,6 +77,7 @@ class WorkerConfigTest(unittest.TestCase):
                 "SMART_ALARM_DEVICE_SECRET_ROOT": str(root),
                 "SMART_ALARM_DEVICE_SECRET_KEY": "k" * 32,
                 "SMART_ALARM_DEVICE_SECRET_KEY_VERSION": "1",
+                "SMART_ALARM_DEVICE_INACTIVITY_TIMEOUT_MS": "90000",
                 "SMART_ALARM_WORKER_BATCH_SIZE": "10",
                 "SMART_ALARM_WORKER_POLL_INTERVAL_MS": "500",
                 "SMART_ALARM_WORKER_LEASE_SECONDS": "30",
@@ -179,6 +182,7 @@ class WorkerKernelTest(unittest.TestCase):
             device_secret_root=Path("/device-secrets"),
             device_secret_key=b"k" * 32,
             device_secret_key_version=1,
+            device_inactivity_timeout_ms=90_000,
             batch_size=10,
             poll_interval_ms=100,
             lease_seconds=30,

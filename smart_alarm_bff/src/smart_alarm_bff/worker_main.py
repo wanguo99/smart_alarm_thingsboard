@@ -81,7 +81,8 @@ async def run_worker(settings: WorkerSettings, stop: asyncio.Event | None = None
                 settings.device_secret_key_version,
             ),
             thingsboard,
-            settings.max_attempts,
+            max_attempts=settings.max_attempts,
+            inactivity_timeout_ms=settings.device_inactivity_timeout_ms,
         )
         platform_handlers = PlatformEntityHandlers(
             database,

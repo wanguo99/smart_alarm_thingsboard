@@ -43,15 +43,23 @@ class DeviceLifecycleHandlers:
         device_secrets: EncryptedFileSecretStore,
         thingsboard: ThingsBoardAdminClient,
         max_attempts: int = 8,
+        inactivity_timeout_ms: int = 90_000,
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be positive")
+        if (
+            not isinstance(inactivity_timeout_ms, int)
+            or isinstance(inactivity_timeout_ms, bool)
+            or not 30_000 <= inactivity_timeout_ms <= 3_600_000
+        ):
+            raise ValueError("inactivity_timeout_ms must be between 30000 and 3600000")
         self._database = database
         self._worker_id = worker_id
         self._secrets = secrets_provider
         self._device_secrets = device_secrets
         self._thingsboard = thingsboard
         self._max_attempts = max_attempts
+        self._inactivity_timeout_ms = inactivity_timeout_ms
 
     def mapping(self) -> dict[str, Callable[[OutboxEvent], Awaitable[None]]]:
         return {
@@ -259,6 +267,9 @@ class DeviceLifecycleHandlers:
                 device_uid=context["device_uid"],
             )
             platform_device_id = platform_device["uuid"]
+            await self._thingsboard.set_inactivity_timeout(
+                session.token, platform_device_id, self._inactivity_timeout_ms,
+            )
             if context["thingsboard_customer_id"] is not None:
                 await self._thingsboard.assign_customer(
                     session.token, context["thingsboard_customer_id"], platform_device_id,
@@ -341,6 +352,9 @@ class DeviceLifecycleHandlers:
         session = await self._session(context)
         device = await self._thingsboard.get_device(session.token, context["thingsboard_device_id"])
         self._thingsboard.verify_device_uid(device, context["device_uid"])
+        await self._thingsboard.set_inactivity_timeout(
+            session.token, context["thingsboard_device_id"], self._inactivity_timeout_ms,
+        )
         await self._thingsboard.update_label(session.token, device, context["display_name"])
         await self._sync_customer_assignment(session.token, device, context["thingsboard_customer_id"])
         for relation in context["relations"]:
