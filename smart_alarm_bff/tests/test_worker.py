@@ -49,11 +49,14 @@ class WorkerConfigTest(unittest.TestCase):
                 "SMART_ALARM_WORKER_INITIAL_BACKOFF_SECONDS": "2",
                 "SMART_ALARM_WORKER_MAX_BACKOFF_SECONDS": "60",
                 "SMART_ALARM_WORKER_METRICS_PORT": "9464",
+                "SMART_ALARM_WEBHOOK_URL": "https://hooks.example.com/notifications",
+                "SMART_ALARM_WEBHOOK_SIGNING_SECRET": "n" * 32,
             }
             settings = WorkerSettings.from_env(env)
             self.assertEqual(settings.database_user, "smart_alarm_worker")
             self.assertEqual(settings.device_inactivity_timeout_ms, 90_000)
             self.assertTrue(settings.database_tls)
+            self.assertEqual(settings.notification_webhook_url, "https://hooks.example.com/notifications")
             self.assertNotIn("worker-password-value", repr(settings))
             with self.assertRaisesRegex(ValueError, "lower than the lease"):
                 WorkerSettings.from_env({**env, "SMART_ALARM_WORKER_HANDLER_TIMEOUT_SECONDS": "30"})
@@ -91,10 +94,17 @@ class WorkerConfigTest(unittest.TestCase):
             self.assertFalse(settings.database_tls)
             self.assertIsNone(settings.database_ca_file)
             self.assertIsNone(settings.thingsboard_ca_file)
+            self.assertIsNone(settings.notification_webhook_url)
             with self.assertRaisesRegex(ValueError, "loopback"):
                 WorkerSettings.from_env({**env, "SMART_ALARM_DATABASE_HOST": "postgres.internal"})
             with self.assertRaisesRegex(ValueError, "loopback HTTP"):
                 WorkerSettings.from_env({**env, "TB_HTTP_URL": "http://thingsboard:9090"})
+            with self.assertRaisesRegex(ValueError, "loopback HTTP URL"):
+                WorkerSettings.from_env({
+                    **env,
+                    "SMART_ALARM_WEBHOOK_URL": "http://hooks.example.com/notifications",
+                    "SMART_ALARM_WEBHOOK_SIGNING_SECRET": "n" * 32,
+                })
 
 
 class MountedSecretProviderTest(unittest.TestCase):

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 from typing import Mapping
+from urllib.parse import urlsplit
 
 from .config import (
     ConfigError,
@@ -17,6 +18,7 @@ from .config import (
     _port,
     _readable_file,
     _required,
+    _secret_https_url,
     read_secret,
 )
 
@@ -69,6 +71,9 @@ class WorkerSettings:
     initial_backoff_seconds: int
     max_backoff_seconds: int
     metrics_port: int
+    notification_webhook_url: str | None = None
+    notification_webhook_secret: bytes | None = field(default=None, repr=False)
+    notification_timeout_seconds: int = 10
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "WorkerSettings":
@@ -100,6 +105,37 @@ class WorkerSettings:
         device_secret_key = read_secret(source, "SMART_ALARM_DEVICE_SECRET_KEY", minimum_bytes=32)
         if len(device_secret_key) != 32:
             raise ConfigError("SMART_ALARM_DEVICE_SECRET_KEY must contain exactly 32 bytes")
+        webhook_raw = source.get("SMART_ALARM_WEBHOOK_URL", "").strip()
+        webhook_url: str | None = None
+        webhook_secret: bytes | None = None
+        if local:
+            if webhook_raw:
+                parsed = urlsplit(webhook_raw)
+                if (
+                    parsed.scheme != "http"
+                    or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+                    or parsed.username
+                    or parsed.password
+                    or parsed.query
+                    or parsed.fragment
+                ):
+                    raise ConfigError("SMART_ALARM_WEBHOOK_URL must be a loopback HTTP URL in local mode")
+                webhook_url = webhook_raw
+                webhook_secret = read_secret(
+                    source, "SMART_ALARM_WEBHOOK_SIGNING_SECRET", minimum_bytes=32,
+                )
+        else:
+            webhook_url = _secret_https_url(source, "SMART_ALARM_WEBHOOK_URL").decode("utf-8")
+            webhook_secret = read_secret(
+                source, "SMART_ALARM_WEBHOOK_SIGNING_SECRET", minimum_bytes=32,
+            )
+        timeout_raw = source.get("SMART_ALARM_NOTIFICATION_TIMEOUT_SECONDS", "10")
+        try:
+            timeout_seconds = int(timeout_raw)
+        except ValueError as exc:
+            raise ConfigError("SMART_ALARM_NOTIFICATION_TIMEOUT_SECONDS must be an integer") from exc
+        if not 1 <= timeout_seconds <= 30:
+            raise ConfigError("SMART_ALARM_NOTIFICATION_TIMEOUT_SECONDS must be between 1 and 30")
         return cls(
             environment=environment,
             deployment_commit=commit,
@@ -132,4 +168,7 @@ class WorkerSettings:
             initial_backoff_seconds=initial_backoff,
             max_backoff_seconds=max_backoff,
             metrics_port=_port(source, "SMART_ALARM_WORKER_METRICS_PORT"),
+            notification_webhook_url=webhook_url,
+            notification_webhook_secret=webhook_secret,
+            notification_timeout_seconds=timeout_seconds,
         )

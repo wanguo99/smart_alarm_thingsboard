@@ -16,6 +16,7 @@ from .config import ConfigError
 from .command_handlers import DeviceCommandHandlers
 from .infrastructure import Infrastructure
 from .lifecycle_handlers import DeviceLifecycleHandlers
+from .notification import NotificationRepository, NotificationWorker, WebhookNotificationSender
 from .platform_handlers import PlatformEntityHandlers
 from .secret_provider import EncryptedFileSecretStore, MountedSecretProvider
 from .thingsboard_admin import ThingsBoardAdminClient
@@ -41,6 +42,7 @@ async def run_worker(settings: WorkerSettings, stop: asyncio.Event | None = None
     context = ssl.create_default_context(cafile=str(settings.database_ca_file)) if settings.database_tls else None
     pool: asyncpg.Pool[Any] | None = None
     thingsboard: ThingsBoardAdminClient | None = None
+    notification_sender: WebhookNotificationSender | None = None
     metrics_server = None
     metrics_thread = None
     try:
@@ -103,14 +105,29 @@ async def run_worker(settings: WorkerSettings, stop: asyncio.Event | None = None
             OutboxRepository(pool),
             {**handlers.mapping(), **platform_handlers.mapping(), **command_handlers.mapping()},
         )
+        notification_worker: NotificationWorker | None = None
+        if settings.notification_webhook_url and settings.notification_webhook_secret:
+            notification_sender = WebhookNotificationSender(
+                settings.notification_webhook_url,
+                settings.notification_webhook_secret,
+                settings.notification_timeout_seconds,
+            )
+            notification_worker = NotificationWorker(
+                settings, NotificationRepository(pool), notification_sender,
+            )
         LOGGER.info("worker started", extra={"worker_id": settings.worker_id})
-        await worker.run(stop_event)
+        tasks = [asyncio.create_task(worker.run(stop_event))]
+        if notification_worker is not None:
+            tasks.append(asyncio.create_task(notification_worker.run(stop_event)))
+        await asyncio.gather(*tasks)
         LOGGER.info("worker drained", extra={"worker_id": settings.worker_id})
     finally:
         for item in installed_signals:
             loop.remove_signal_handler(item)
         if thingsboard is not None:
             await thingsboard.close()
+        if notification_sender is not None:
+            await notification_sender.close()
         if pool is not None:
             await pool.close()
         if metrics_server is not None:
