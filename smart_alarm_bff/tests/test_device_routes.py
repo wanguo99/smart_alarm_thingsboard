@@ -9,6 +9,7 @@ try:
     from smart_alarm_bff.device_routes import (
         _operation_status,
         _optional_uuid,
+        _public_device,
         _public_operation,
         _retry_response,
         register_device_routes,
@@ -92,6 +93,7 @@ class DeviceRouteContractTest(unittest.TestCase):
         response = _retry_response(operation, device)
         self.assertEqual(response["status"], "QUEUED")
         self.assertEqual(response["result"]["device"]["deviceUid"], str(device["device_uid"]))
+        self.assertFalse(_public_device(device)["active"])
 
 
 if __name__ == "__main__":

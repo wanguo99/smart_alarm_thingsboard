@@ -55,7 +55,9 @@ def _public_device(row: Any) -> dict[str, object]:
         "name": row["display_name"],
         "label": row["display_name"],
         "type": "smart-alarm",
-        "active": row["lifecycle_state"] == "ACTIVE",
+        # Lifecycle eligibility is not connection presence. The frontend derives
+        # online state from the latest heartbeat returned by entity-query.
+        "active": False,
         "customerId": str(row["customer_id"]) if row["customer_id"] else None,
         "assetId": str(row["asset_id"]) if row["asset_id"] else None,
         "groupId": str(row["business_group_id"]) if row["business_group_id"] else None,

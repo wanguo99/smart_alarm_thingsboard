@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import math
 import re
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
@@ -138,6 +139,137 @@ class ThingsBoardClient:
             return ThingsBoardUser.from_payload(response.json())
         except (ValueError, PolicyError) as exc:
             raise ThingsBoardError("invalid_platform_identity_response", retryable=False) from exc
+
+    async def query_device_latest(
+        self,
+        access_token: str,
+        device_ids: tuple[UUID, ...],
+        latest_values: tuple[tuple[str, str], ...],
+    ) -> dict[str, object]:
+        if not 1 <= len(device_ids) <= 100 or len(set(device_ids)) != len(device_ids):
+            raise ThingsBoardError("invalid_platform_entity_query", retryable=False)
+        requested_keys: dict[str, set[str]] = {"TIME_SERIES": set(), "ATTRIBUTE": set()}
+        normalized_latest: list[dict[str, str]] = []
+        for value_type, key in latest_values:
+            if (
+                value_type not in requested_keys
+                or not key
+                or len(key) > 128
+                or key != key.strip()
+                or key in requested_keys[value_type]
+            ):
+                raise ThingsBoardError("invalid_platform_entity_query", retryable=False)
+            requested_keys[value_type].add(key)
+            normalized_latest.append({"type": value_type, "key": key})
+        if len(normalized_latest) > 100:
+            raise ThingsBoardError("invalid_platform_entity_query", retryable=False)
+
+        response = await self._authorized(
+            "POST",
+            "/api/entitiesQuery/find",
+            access_token,
+            json={
+                "entityFilter": {
+                    "type": "entityList",
+                    "entityType": "DEVICE",
+                    "entityList": [str(device_id) for device_id in device_ids],
+                },
+                "pageLink": {"page": 0, "pageSize": len(device_ids)},
+                "entityFields": [],
+                "latestValues": normalized_latest,
+                "keyFilters": [],
+            },
+        )
+        if response.status_code != 200:
+            raise ThingsBoardError(
+                "platform_entity_query_failed",
+                retryable=response.status_code >= 500 or response.status_code == 429,
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ThingsBoardError("invalid_platform_entity_query_response", retryable=False) from exc
+        return self._normalize_entity_query(payload, device_ids, requested_keys)
+
+    @staticmethod
+    def _normalize_entity_query(
+        payload: object,
+        device_ids: tuple[UUID, ...],
+        requested_keys: dict[str, set[str]],
+    ) -> dict[str, object]:
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise ThingsBoardError("invalid_platform_entity_query_response", retryable=False)
+        data = payload["data"]
+        total_pages = payload.get("totalPages")
+        total_elements = payload.get("totalElements")
+        has_next = payload.get("hasNext")
+        if (
+            not isinstance(total_pages, int)
+            or isinstance(total_pages, bool)
+            or total_pages != (1 if data else 0)
+            or not isinstance(total_elements, int)
+            or isinstance(total_elements, bool)
+            or total_elements != len(data)
+            or len(data) > len(device_ids)
+            or has_next is not False
+        ):
+            raise ThingsBoardError("invalid_platform_entity_query_response", retryable=False)
+
+        allowed_ids = set(device_ids)
+        response_ids: set[UUID] = set()
+        normalized_data: list[dict[str, object]] = []
+        for row in data:
+            entity = row.get("entityId") if isinstance(row, dict) else None
+            try:
+                entity_id = UUID(entity.get("id")) if isinstance(entity, dict) else None
+            except (TypeError, ValueError):
+                entity_id = None
+            if (
+                entity_id is None
+                or entity.get("entityType") != "DEVICE"
+                or entity_id not in allowed_ids
+                or entity_id in response_ids
+            ):
+                raise ThingsBoardError("invalid_platform_entity_query_response", retryable=False)
+            response_ids.add(entity_id)
+            latest = row.get("latest", {})
+            if latest is None:
+                latest = {}
+            if not isinstance(latest, dict):
+                raise ThingsBoardError("invalid_platform_entity_query_response", retryable=False)
+            normalized_by_type: dict[str, dict[str, dict[str, object]]] = {}
+            for value_type in ("TIME_SERIES", "ATTRIBUTE"):
+                entries = latest.get(value_type)
+                if entries is None:
+                    continue
+                if not isinstance(entries, dict):
+                    raise ThingsBoardError("invalid_platform_entity_query_response", retryable=False)
+                normalized_entries: dict[str, dict[str, object]] = {}
+                for key, candidate in entries.items():
+                    if key not in requested_keys[value_type] or not isinstance(candidate, dict):
+                        raise ThingsBoardError("invalid_platform_entity_query_response", retryable=False)
+                    timestamp = candidate.get("ts")
+                    value = candidate.get("value")
+                    if (
+                        not isinstance(timestamp, int)
+                        or isinstance(timestamp, bool)
+                        or timestamp < 0
+                        or not isinstance(value, (str, int, float, bool))
+                        or isinstance(value, float) and not math.isfinite(value)
+                    ):
+                        raise ThingsBoardError("invalid_platform_entity_query_response", retryable=False)
+                    normalized_entries[key] = {"ts": timestamp, "value": value}
+                normalized_by_type[value_type] = normalized_entries
+            normalized_data.append({
+                "entityId": {"id": str(entity_id), "entityType": "DEVICE"},
+                "latest": normalized_by_type,
+            })
+        return {
+            "data": normalized_data,
+            "totalPages": total_pages,
+            "totalElements": total_elements,
+            "hasNext": False,
+        }
 
     async def create_tenant(self, access_token: str, *, name: str) -> UUID:
         self._entity_name(name, "tenant")

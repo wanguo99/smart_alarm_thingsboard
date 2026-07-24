@@ -18,6 +18,7 @@ from .config import ConfigError, load_settings
 from .infrastructure import Infrastructure
 from .directory_routes import mount_directory_routes
 from .device_routes import mount_device_routes
+from .entity_query_routes import mount_entity_query_routes
 from .write_routes import mount_write_routes
 from .session import SessionError, SessionService, parse_bearer
 from .websocket_proxy import mount_websocket_proxy
@@ -148,6 +149,7 @@ def create_app() -> FastAPI:
     mount_directory_routes(app, sessions, infrastructure.database)
     mount_write_routes(app, sessions, infrastructure.database, infrastructure.thingsboard)
     mount_device_routes(app, sessions, infrastructure.database)
+    mount_entity_query_routes(app, sessions, infrastructure.database, infrastructure.thingsboard)
     mount_activation_routes(app, infrastructure.database, infrastructure.device_secrets)
     mount_websocket_proxy(
         app,
