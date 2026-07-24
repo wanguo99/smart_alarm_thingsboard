@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -13,11 +14,23 @@ from .policy import PolicyError
 from .thingsboard import THINGSBOARD_NULL_UUID, ThingsBoardUser, normalize_username
 
 
+DEVICE_COMMAND_RESULTS = {
+    "ping": frozenset({"pong"}),
+    "health": frozenset({"ok", "degraded", "fault"}),
+    "clearFaults": frozenset({"faults_cleared"}),
+    "reboot": frozenset({"reboot_scheduled"}),
+}
+PERSISTENT_RPC_STATUSES = frozenset({
+    "QUEUED", "SENT", "DELIVERED", "SUCCESSFUL", "TIMEOUT", "EXPIRED", "FAILED",
+})
+
+
 class PlatformAdminError(RuntimeError):
-    def __init__(self, code: str, *, retryable: bool) -> None:
+    def __init__(self, code: str, *, retryable: bool, status_code: int | None = None) -> None:
         super().__init__(code)
         self.code = code
         self.retryable = retryable
+        self.status_code = status_code
 
 
 @dataclass(frozen=True, slots=True)
@@ -481,6 +494,185 @@ class ThingsBoardAdminClient:
             self._expect(response, {200}, "thingsboard_device_delete_failed")
 
     @staticmethod
+    def _command_response(command: str, value: object) -> dict[str, object]:
+        expected = DEVICE_COMMAND_RESULTS.get(command)
+        if expected is None:
+            raise PlatformAdminError("invalid_device_command", retryable=False)
+        if not isinstance(value, dict) or value.get("success") is not True or value.get("result") not in expected:
+            raise PlatformAdminError("invalid_device_command_response", retryable=False)
+        result: dict[str, object] = {"success": True, "result": value["result"]}
+        if command == "health":
+            fault_bits = value.get("faultBits")
+            if not isinstance(fault_bits, int) or isinstance(fault_bits, bool) or not 0 <= fault_bits <= 0xFFFFFFFF:
+                raise PlatformAdminError("invalid_device_command_response", retryable=False)
+            result["faultBits"] = fault_bits
+        return result
+
+    @classmethod
+    def _persistent_rpc(
+        cls,
+        value: object,
+        *,
+        device_id: UUID,
+        command: str,
+        operation_id: UUID,
+        rpc_id: UUID | None = None,
+    ) -> dict[str, object]:
+        request = value.get("request") if isinstance(value, dict) else None
+        request_body = request.get("body") if isinstance(request, dict) else None
+        if request_body is None:
+            request_body = request
+        params = request_body.get("params") if isinstance(request_body, dict) else None
+        if isinstance(params, str):
+            try:
+                params = json.loads(params)
+            except json.JSONDecodeError:
+                params = None
+        if (
+            not isinstance(value, dict)
+            or not isinstance(value.get("id"), dict)
+            or value["id"].get("entityType") != "RPC"
+            or not isinstance(value.get("deviceId"), dict)
+            or value["deviceId"].get("entityType") != "DEVICE"
+            or value.get("status") not in PERSISTENT_RPC_STATUSES
+            or not isinstance(value.get("expirationTime"), int)
+            or isinstance(value.get("expirationTime"), bool)
+            or value["expirationTime"] <= 0
+            or not isinstance(request_body, dict)
+            or request_body.get("method") != command
+            or params != {}
+            or not isinstance(value.get("additionalInfo"), dict)
+            or value["additionalInfo"].get("operationId") != str(operation_id)
+        ):
+            raise PlatformAdminError("invalid_persistent_rpc_response", retryable=False)
+        parsed_rpc_id = _entity_uuid(value["id"])
+        parsed_device_id = _entity_uuid(value["deviceId"])
+        if parsed_device_id != device_id or (rpc_id is not None and parsed_rpc_id != rpc_id):
+            raise PlatformAdminError("persistent_rpc_identity_mismatch", retryable=False)
+        result: dict[str, object] = {
+            "rpcId": str(parsed_rpc_id),
+            "platformStatus": value["status"],
+            "expirationTime": value["expirationTime"],
+        }
+        if value["status"] == "SUCCESSFUL":
+            result["response"] = cls._command_response(command, value.get("response"))
+        return result
+
+    async def submit_persistent_rpc(
+        self,
+        token: str,
+        *,
+        device_id: UUID,
+        command: str,
+        operation_id: UUID,
+        expiration_time: int,
+        retries: int,
+    ) -> dict[str, object]:
+        if command not in DEVICE_COMMAND_RESULTS or not 0 <= retries <= 10 or expiration_time <= 0:
+            raise PlatformAdminError("invalid_device_command", retryable=False)
+        response = await self._authorized(
+            "POST",
+            f"/api/rpc/twoway/{device_id}",
+            token,
+            json={
+                "method": command,
+                "params": {},
+                "persistent": True,
+                "retries": retries,
+                "expirationTime": expiration_time,
+                "additionalInfo": {"operationId": str(operation_id)},
+            },
+        )
+        self._expect(response, {200}, "thingsboard_command_rejected")
+        try:
+            payload = response.json()
+            rpc_id = UUID(payload.get("rpcId")) if isinstance(payload, dict) else None
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise PlatformAdminError("invalid_persistent_rpc_submit_response", retryable=False) from exc
+        if rpc_id is None:
+            raise PlatformAdminError("invalid_persistent_rpc_submit_response", retryable=False)
+        return {
+            "rpcId": str(rpc_id),
+            "platformStatus": "QUEUED",
+            "expirationTime": expiration_time,
+        }
+
+    async def persistent_rpc(
+        self,
+        token: str,
+        *,
+        rpc_id: UUID,
+        device_id: UUID,
+        command: str,
+        operation_id: UUID,
+    ) -> dict[str, object]:
+        response = await self._authorized("GET", f"/api/rpc/persistent/{rpc_id}", token)
+        self._expect(response, {200}, "thingsboard_command_status_unavailable")
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise PlatformAdminError("invalid_persistent_rpc_response", retryable=False) from exc
+        return self._persistent_rpc(
+            payload, device_id=device_id, command=command, operation_id=operation_id, rpc_id=rpc_id,
+        )
+
+    async def find_persistent_rpc(
+        self,
+        token: str,
+        *,
+        device_id: UUID,
+        command: str,
+        operation_id: UUID,
+        max_pages: int = 5,
+    ) -> dict[str, object] | None:
+        if not 1 <= max_pages <= 20:
+            raise PlatformAdminError("invalid_persistent_rpc_page_limit", retryable=False)
+        match: dict[str, object] | None = None
+        for page in range(max_pages):
+            response = await self._authorized(
+                "GET",
+                f"/api/rpc/persistent/device/{device_id}",
+                token,
+                params={"pageSize": 100, "page": page, "sortProperty": "createdTime", "sortOrder": "DESC"},
+            )
+            self._expect(response, {200}, "thingsboard_command_lookup_unavailable")
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise PlatformAdminError("invalid_persistent_rpc_page", retryable=False) from exc
+            if (
+                not isinstance(payload, dict)
+                or not isinstance(payload.get("data"), list)
+                or len(payload["data"]) > 100
+                or not isinstance(payload.get("totalPages"), int)
+                or isinstance(payload.get("totalPages"), bool)
+                or payload["totalPages"] < 0
+                or not isinstance(payload.get("totalElements"), int)
+                or isinstance(payload.get("totalElements"), bool)
+                or payload["totalElements"] < 0
+                or not isinstance(payload.get("hasNext"), bool)
+                or payload["hasNext"] != (page + 1 < payload["totalPages"])
+            ):
+                raise PlatformAdminError("invalid_persistent_rpc_page", retryable=False)
+            for item in payload["data"]:
+                additional_info = item.get("additionalInfo") if isinstance(item, dict) else None
+                if not isinstance(additional_info, dict) or additional_info.get("operationId") != str(operation_id):
+                    continue
+                candidate = self._persistent_rpc(
+                    item, device_id=device_id, command=command, operation_id=operation_id,
+                )
+                if match is not None and match["rpcId"] != candidate["rpcId"]:
+                    raise PlatformAdminError("persistent_rpc_identity_conflict", retryable=False)
+                match = candidate
+            if not payload["hasNext"]:
+                return match
+        raise PlatformAdminError("persistent_rpc_lookup_limit_exceeded", retryable=False)
+
+    async def cancel_persistent_rpc(self, token: str, rpc_id: UUID) -> None:
+        response = await self._authorized("DELETE", f"/api/rpc/persistent/{rpc_id}", token)
+        self._expect(response, {200, 404}, "thingsboard_command_cancel_rejected")
+
+    @staticmethod
     def verify_device_uid(device: dict[str, object], expected: UUID) -> None:
         ThingsBoardAdminClient._verify_device_uid(device, expected)
 
@@ -505,4 +697,8 @@ class ThingsBoardAdminClient:
     @staticmethod
     def _expect(response: httpx.Response, expected: set[int], code: str) -> None:
         if response.status_code not in expected:
-            raise PlatformAdminError(code, retryable=response.status_code >= 500 or response.status_code == 429)
+            raise PlatformAdminError(
+                code,
+                retryable=response.status_code >= 500 or response.status_code == 429,
+                status_code=response.status_code,
+            )

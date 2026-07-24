@@ -13,6 +13,7 @@ import asyncpg
 from prometheus_client import start_http_server
 
 from .config import ConfigError
+from .command_handlers import DeviceCommandHandlers
 from .infrastructure import Infrastructure
 from .lifecycle_handlers import DeviceLifecycleHandlers
 from .platform_handlers import PlatformEntityHandlers
@@ -89,10 +90,17 @@ async def run_worker(settings: WorkerSettings, stop: asyncio.Event | None = None
             thingsboard,
             settings.max_attempts,
         )
+        command_handlers = DeviceCommandHandlers(
+            database,
+            settings.worker_id,
+            MountedSecretProvider(settings.secret_root),
+            thingsboard,
+            settings.max_attempts,
+        )
         worker = OutboxWorker(
             settings,
             OutboxRepository(pool),
-            {**handlers.mapping(), **platform_handlers.mapping()},
+            {**handlers.mapping(), **platform_handlers.mapping(), **command_handlers.mapping()},
         )
         LOGGER.info("worker started", extra={"worker_id": settings.worker_id})
         await worker.run(stop_event)

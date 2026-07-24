@@ -32,6 +32,8 @@ _OPERATION_KINDS = {
     "device-register": "register",
     "device-update": "update",
     "device-retire": "retire",
+    "device-command": "command",
+    "device-command-cancel": "command-cancel",
 }
 
 
@@ -131,6 +133,17 @@ def _public_operation(row: Any) -> dict[str, object]:
         (kind == "update" and row["device_lifecycle_state"] == "ACTIVE")
         or (kind == "retire" and row["device_lifecycle_state"] == "RETIREMENT_FAILED")
     )
+    result = dict(row["result"])
+    cancellation_retryable = (
+        kind == "command-cancel" and row["error_code"] == "command_cancel_outcome_unknown"
+    )
+    warning = result.get("cancellationWarning") or result.get("warning")
+    cancellable = (
+        kind == "command"
+        and status == "PENDING"
+        and row.get("platform_rpc_id") is not None
+        and result.get("platformStatus") in {"QUEUED", "SENT", "DELIVERED"}
+    )
     return {
         "operationId": str(row["id"]),
         "requestId": row["idempotency_key"],
@@ -143,8 +156,9 @@ def _public_operation(row: Any) -> dict[str, object]:
         "retryOfOperationId": str(row["parent_operation_id"]) if row["parent_operation_id"] else None,
         "retryOperationId": str(retry_operation_id) if retry_operation_id else None,
         "retryable": status == "FAILED" and retry_operation_id is None
-        and not row["has_newer_operation"] and lifecycle_retryable,
-        "cancellable": False,
+        and (cancellation_retryable or (not row["has_newer_operation"] and lifecycle_retryable)),
+        "cancellable": cancellable,
+        **({"warning": warning} if isinstance(warning, str) and warning else {}),
     }
 
 

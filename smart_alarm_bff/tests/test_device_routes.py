@@ -53,6 +53,8 @@ class DeviceRouteContractTest(unittest.TestCase):
             "retry_operation_id": None,
             "has_newer_operation": False,
             "device_lifecycle_state": "ACTIVE",
+            "result": {},
+            "platform_rpc_id": None,
             "created_at": now,
             "updated_at": now,
         }
@@ -67,6 +69,47 @@ class DeviceRouteContractTest(unittest.TestCase):
         self.assertFalse(_public_operation({**row, "has_newer_operation": True})["retryable"])
         self.assertFalse(_public_operation({**row, "device_lifecycle_state": "RETIRED"})["retryable"])
         self.assertEqual(_operation_status("OUTCOME_UNKNOWN"), "PENDING")
+
+    def test_command_history_exposes_cancellation_and_manual_retry_state(self) -> None:
+        now = datetime(2026, 7, 24, tzinfo=UTC)
+        command = _public_operation({
+            "id": UUID("11111111-1111-4111-8111-111111111111"),
+            "operation_type": "device-command",
+            "idempotency_key": "command-request",
+            "resource_id": "22222222-2222-4222-8222-222222222222",
+            "state": "QUEUED",
+            "error_code": None,
+            "parent_operation_id": None,
+            "retry_operation_id": None,
+            "has_newer_operation": False,
+            "device_lifecycle_state": "ACTIVE",
+            "result": {"command": "ping", "platformStatus": "QUEUED"},
+            "platform_rpc_id": UUID("33333333-3333-4333-8333-333333333333"),
+            "created_at": now,
+            "updated_at": now,
+        })
+        self.assertEqual(command["kind"], "command")
+        self.assertTrue(command["cancellable"])
+
+        cancellation = _public_operation({
+            "id": UUID("44444444-4444-4444-8444-444444444444"),
+            "operation_type": "device-command-cancel",
+            "idempotency_key": "cancel-request",
+            "resource_id": "22222222-2222-4222-8222-222222222222",
+            "state": "FAILED",
+            "error_code": "command_cancel_outcome_unknown",
+            "parent_operation_id": command["operationId"],
+            "retry_operation_id": None,
+            "has_newer_operation": False,
+            "device_lifecycle_state": "ACTIVE",
+            "result": {"warning": "delivery outcome requires review"},
+            "platform_rpc_id": None,
+            "created_at": now,
+            "updated_at": now,
+        })
+        self.assertEqual(cancellation["kind"], "command-cancel")
+        self.assertTrue(cancellation["retryable"])
+        self.assertEqual(cancellation["warning"], "delivery outcome requires review")
 
     def test_retry_response_keeps_queued_work_distinct_from_success(self) -> None:
         operation = {

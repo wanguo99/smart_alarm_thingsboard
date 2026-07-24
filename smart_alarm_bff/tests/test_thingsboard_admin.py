@@ -293,6 +293,63 @@ class ThingsBoardAdminClientTest(unittest.TestCase):
         self.assertNotIn(password, rendered)
         self.assertEqual(captured.exception.code, "service_identity_rejected")
 
+    def test_persistent_rpc_submit_status_lookup_and_cancel_contract(self) -> None:
+        rpc_id = UUID("88888888-8888-4888-8888-888888888888")
+        requests: list[httpx.Request] = []
+
+        def persistent_payload(status: str = "QUEUED") -> dict[str, object]:
+            return {
+                "id": entity(rpc_id, "RPC"),
+                "deviceId": entity(DEVICE_ID, "DEVICE"),
+                "status": status,
+                "expirationTime": 1_900_000_000_000,
+                "request": {"body": {"method": "ping", "params": "{}"}},
+                "additionalInfo": {"operationId": "99999999-9999-4999-8999-999999999999"},
+            }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.method == "POST" and request.url.path == f"/api/rpc/twoway/{DEVICE_ID}":
+                self.assertEqual(json.loads(request.content)["persistent"], True)
+                return httpx.Response(200, json={"rpcId": str(rpc_id)})
+            if request.method == "GET" and request.url.path == f"/api/rpc/persistent/{rpc_id}":
+                return httpx.Response(200, json=persistent_payload())
+            if request.method == "GET" and request.url.path == f"/api/rpc/persistent/device/{DEVICE_ID}":
+                return httpx.Response(200, json={"data": [persistent_payload()], "totalPages": 1, "totalElements": 1, "hasNext": False})
+            if request.method == "DELETE" and request.url.path == f"/api/rpc/persistent/{rpc_id}":
+                return httpx.Response(200, json={})
+            raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+        async def scenario(client: ThingsBoardAdminClient) -> None:
+            submitted = await client.submit_persistent_rpc(
+                "service.jwt", device_id=DEVICE_ID, command="ping",
+                operation_id=UUID("99999999-9999-4999-8999-999999999999"),
+                expiration_time=1_900_000_000_000, retries=1,
+            )
+            self.assertEqual(submitted["rpcId"], str(rpc_id))
+            status = await client.persistent_rpc(
+                "service.jwt", rpc_id=rpc_id, device_id=DEVICE_ID, command="ping",
+                operation_id=UUID("99999999-9999-4999-8999-999999999999"),
+            )
+            self.assertEqual(status["platformStatus"], "QUEUED")
+            successful_payload = persistent_payload("SUCCESSFUL")
+            successful_payload["response"] = {"success": True, "result": "pong"}
+            successful = client._persistent_rpc(
+                successful_payload, rpc_id=rpc_id, device_id=DEVICE_ID, command="ping",
+                operation_id=UUID("99999999-9999-4999-8999-999999999999"),
+            )
+            self.assertEqual(successful["response"], {"success": True, "result": "pong"})
+            found = await client.find_persistent_rpc(
+                "service.jwt", device_id=DEVICE_ID, command="ping",
+                operation_id=UUID("99999999-9999-4999-8999-999999999999"),
+            )
+            self.assertEqual(found["rpcId"], str(rpc_id))
+            await client.cancel_persistent_rpc("service.jwt", rpc_id)
+
+        self.execute_scenario(handler, scenario)
+        self.assertEqual(requests[0].url.path, f"/api/rpc/twoway/{DEVICE_ID}")
+        self.assertEqual(requests[-1].method, "DELETE")
+
 
 if __name__ == "__main__":
     unittest.main()
