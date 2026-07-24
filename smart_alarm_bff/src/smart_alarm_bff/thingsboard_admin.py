@@ -206,6 +206,10 @@ class ThingsBoardAdminClient:
             self._expect(response, {200}, "thingsboard_device_delete_failed")
 
     @staticmethod
+    def verify_device_uid(device: dict[str, object], expected: UUID) -> None:
+        ThingsBoardAdminClient._verify_device_uid(device, expected)
+
+    @staticmethod
     def _verify_device_uid(device: dict[str, object], expected: UUID) -> None:
         additional_info = device.get("additionalInfo")
         if not isinstance(additional_info, dict) or additional_info.get("smartAlarmDeviceUid") != str(expected):

@@ -10,7 +10,7 @@ class MigrationContractTest(unittest.TestCase):
     def test_initial_schema_covers_production_control_plane(self) -> None:
         directory = Path(__file__).resolve().parents[1] / "migrations"
         migrations = load_migrations(directory)
-        self.assertEqual([item[0] for item in migrations], ["0001_initial.sql", "0002_seed_product_roles.sql", "0003_allow_system_scope_records.sql", "0004_system_scope_rls.sql", "0005_device_profile_metadata.sql", "0006_async_device_lifecycle.sql", "0007_outbox_fencing.sql", "0008_usernames.sql", "0009_device_activation_grants.sql"])
+        self.assertEqual([item[0] for item in migrations], ["0001_initial.sql", "0002_seed_product_roles.sql", "0003_allow_system_scope_records.sql", "0004_system_scope_rls.sql", "0005_device_profile_metadata.sql", "0006_async_device_lifecycle.sql", "0007_outbox_fencing.sql", "0008_usernames.sql", "0009_device_activation_grants.sql", "0010_retired_device_credentials.sql"])
         sql = migrations[0][2]
         for table in (
             "tenants",
@@ -96,6 +96,14 @@ class MigrationContractTest(unittest.TestCase):
         self.assertIn("FORCE ROW LEVEL SECURITY", migration)
         self.assertIn("smart_alarm.is_system_scope()", migration)
         self.assertNotIn("access_token", migration.lower())
+
+    def test_retired_devices_keep_platform_history_without_live_secret_reference(self) -> None:
+        directory = Path(__file__).resolve().parents[1] / "migrations"
+        migration = load_migrations(directory)[9][2]
+        self.assertIn("device_platform_binding_ck", migration)
+        self.assertIn("lifecycle_state = 'RETIRED'", migration)
+        self.assertIn("credential_secret_ref IS NULL", migration)
+        self.assertIn("device_activation_grants_consumed_at_ck", migration)
 
     def test_migration_names_and_checksums_are_stable(self) -> None:
         directory = Path(__file__).resolve().parents[1] / "migrations"
