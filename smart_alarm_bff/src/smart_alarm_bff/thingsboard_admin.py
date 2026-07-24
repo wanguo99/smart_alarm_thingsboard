@@ -68,6 +68,22 @@ def _device(payload: object) -> dict[str, object]:
     return result
 
 
+def _asset(payload: object) -> dict[str, object]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("name"), str):
+        raise PlatformAdminError("invalid_platform_asset_response", retryable=False)
+    result = dict(payload)
+    result["uuid"] = _entity_uuid(payload.get("id"))
+    return result
+
+
+def _profile(payload: object) -> dict[str, object]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("name"), str):
+        raise PlatformAdminError("invalid_platform_profile_response", retryable=False)
+    result = dict(payload)
+    result["uuid"] = _entity_uuid(payload.get("id"))
+    return result
+
+
 class ThingsBoardAdminClient:
     def __init__(self, base_url: str, ca_file: Path | str | bool, *, client: httpx.AsyncClient | None = None) -> None:
         self._owned = client is None
@@ -208,6 +224,216 @@ class ThingsBoardAdminClient:
         })
         if response.status_code not in {200, 404}:
             self._expect(response, {200}, "thingsboard_relation_delete_failed")
+
+    async def create_asset(
+        self,
+        token: str,
+        *,
+        name: str,
+        label: str,
+        asset_type: str,
+        asset_uid: UUID,
+        customer_id: UUID | None,
+    ) -> dict[str, object]:
+        payload = {
+            "name": name,
+            "type": asset_type,
+            "label": label,
+            "additionalInfo": {"smartAlarmAssetUid": str(asset_uid)},
+        }
+        try:
+            response = await self._authorized("POST", "/api/asset", token, json=payload)
+        except PlatformAdminError as exc:
+            if not exc.retryable:
+                raise
+            existing = await self.find_asset_by_name(token, name)
+            if existing is not None:
+                self.verify_asset_uid(existing, asset_uid)
+                return existing
+            raise
+        if response.status_code != 200:
+            existing = await self.find_asset_by_name(token, name)
+            if existing is not None:
+                self.verify_asset_uid(existing, asset_uid)
+                return existing
+        self._expect(response, {200}, "thingsboard_asset_create_failed")
+        result = _asset(response.json())
+        self.verify_asset_uid(result, asset_uid)
+        if customer_id is not None:
+            await self.assign_asset(token, customer_id, result["uuid"])
+        return result
+
+    async def find_asset_by_name(self, token: str, name: str) -> dict[str, object] | None:
+        response = await self._authorized("GET", "/api/tenant/assets", token, params={"assetName": name})
+        if response.status_code == 404:
+            return None
+        self._expect(response, {200}, "thingsboard_asset_lookup_failed")
+        return _asset(response.json())
+
+    async def get_asset(self, token: str, asset_id: UUID) -> dict[str, object]:
+        response = await self._authorized("GET", f"/api/asset/{asset_id}", token)
+        self._expect(response, {200}, "thingsboard_asset_read_failed")
+        return _asset(response.json())
+
+    async def update_asset(
+        self,
+        token: str,
+        asset_id: UUID,
+        *,
+        name: str,
+        label: str,
+        asset_type: str,
+        asset_uid: UUID,
+    ) -> dict[str, object]:
+        current = await self.get_asset(token, asset_id)
+        self.verify_asset_uid(current, asset_uid)
+        payload = {key: value for key, value in current.items() if key != "uuid"}
+        payload.update({"name": name, "type": asset_type, "label": label})
+        response = await self._authorized("POST", "/api/asset", token, json=payload)
+        self._expect(response, {200}, "thingsboard_asset_update_failed")
+        result = _asset(response.json())
+        self.verify_asset_uid(result, asset_uid)
+        return result
+
+    async def assign_asset(self, token: str, customer_id: UUID, asset_id: UUID) -> None:
+        response = await self._authorized("POST", f"/api/customer/{customer_id}/asset/{asset_id}", token)
+        self._expect(response, {200}, "thingsboard_asset_customer_assignment_failed")
+
+    async def unassign_asset(self, token: str, asset_id: UUID) -> None:
+        response = await self._authorized("DELETE", f"/api/customer/asset/{asset_id}", token)
+        if response.status_code not in {200, 404}:
+            self._expect(response, {200}, "thingsboard_asset_customer_unassignment_failed")
+
+    async def delete_asset(self, token: str, asset_id: UUID) -> None:
+        response = await self._authorized("DELETE", f"/api/asset/{asset_id}", token)
+        if response.status_code not in {200, 404}:
+            self._expect(response, {200}, "thingsboard_asset_delete_failed")
+
+    async def save_asset_relation(self, token: str, from_asset_id: UUID, to_asset_id: UUID) -> None:
+        response = await self._authorized("POST", "/api/relation", token, json={
+            "from": {"id": str(from_asset_id), "entityType": "ASSET"},
+            "to": {"id": str(to_asset_id), "entityType": "ASSET"},
+            "type": "Contains",
+            "typeGroup": "COMMON",
+        })
+        self._expect(response, {200}, "thingsboard_asset_relation_create_failed")
+
+    async def delete_asset_relation(self, token: str, from_asset_id: UUID, to_asset_id: UUID) -> None:
+        response = await self._authorized("DELETE", "/api/relation", token, params={
+            "fromId": str(from_asset_id), "fromType": "ASSET", "relationType": "Contains",
+            "relationTypeGroup": "COMMON", "toId": str(to_asset_id), "toType": "ASSET",
+        })
+        if response.status_code not in {200, 404}:
+            self._expect(response, {200}, "thingsboard_asset_relation_delete_failed")
+
+    async def create_device_profile(
+        self,
+        token: str,
+        *,
+        name: str,
+        profile_type: str,
+        transport_type: str,
+        profile_uid: UUID,
+        is_default: bool,
+    ) -> dict[str, object]:
+        transport: dict[str, object] = {"type": transport_type}
+        if transport_type == "MQTT":
+            transport.update({
+                "deviceTelemetryTopic": "v1/devices/me/telemetry",
+                "deviceAttributesTopic": "v1/devices/me/attributes",
+                "deviceAttributesSubscribeTopic": "v1/devices/me/attributes",
+                "transportPayloadTypeConfiguration": {"transportPayloadType": "JSON"},
+                "sendAckOnValidationException": False,
+            })
+        payload = {
+            "name": name,
+            "type": "DEFAULT",
+            "transportType": transport_type,
+            "description": f"Smart Alarm profile {profile_uid}",
+            "default": is_default,
+            "profileData": {
+                "configuration": {"type": "DEFAULT"},
+                "transportConfiguration": transport,
+                "provisionConfiguration": {"type": "DISABLED", "provisionDeviceSecret": None},
+                "alarms": [],
+            },
+        }
+        response = await self._authorized("POST", "/api/deviceProfile", token, json=payload)
+        if response.status_code != 200:
+            existing = await self.find_device_profile_by_name(token, name)
+            if existing is not None:
+                self.verify_profile_uid(existing, profile_uid)
+                return existing
+        self._expect(response, {200}, "thingsboard_profile_create_failed")
+        result = _profile(response.json())
+        self.verify_profile_uid(result, profile_uid)
+        return result
+
+    async def find_device_profile_by_name(self, token: str, name: str) -> dict[str, object] | None:
+        response = await self._authorized("GET", "/api/deviceProfiles", token, params={
+            "pageSize": 100, "page": 0, "textSearch": name, "sortProperty": "name", "sortOrder": "ASC",
+        })
+        self._expect(response, {200}, "thingsboard_profile_lookup_failed")
+        try:
+            payload = response.json()
+            rows = payload["data"] if isinstance(payload, dict) else None
+        except (ValueError, KeyError, TypeError) as exc:
+            raise PlatformAdminError("invalid_platform_profile_list_response", retryable=False) from exc
+        if not isinstance(rows, list):
+            raise PlatformAdminError("invalid_platform_profile_list_response", retryable=False)
+        for row in rows:
+            if isinstance(row, dict) and row.get("name") == name:
+                return _profile(row)
+        return None
+
+    async def get_device_profile(self, token: str, profile_id: UUID) -> dict[str, object]:
+        response = await self._authorized("GET", f"/api/deviceProfile/{profile_id}", token)
+        self._expect(response, {200}, "thingsboard_profile_read_failed")
+        return _profile(response.json())
+
+    async def update_device_profile(
+        self,
+        token: str,
+        profile_id: UUID,
+        *,
+        name: str,
+        profile_type: str,
+        transport_type: str,
+        profile_uid: UUID,
+        is_default: bool,
+    ) -> dict[str, object]:
+        current = await self.get_device_profile(token, profile_id)
+        self.verify_profile_uid(current, profile_uid)
+        payload = {key: value for key, value in current.items() if key != "uuid"}
+        payload.update({"name": name, "type": "DEFAULT", "transportType": transport_type, "default": is_default})
+        response = await self._authorized("POST", "/api/deviceProfile", token, json=payload)
+        self._expect(response, {200}, "thingsboard_profile_update_failed")
+        result = _profile(response.json())
+        self.verify_profile_uid(result, profile_uid)
+        return result
+
+    async def set_default_device_profile(self, token: str, profile_id: UUID, profile_uid: UUID) -> None:
+        current = await self.get_device_profile(token, profile_id)
+        self.verify_profile_uid(current, profile_uid)
+        response = await self._authorized("POST", f"/api/deviceProfile/{profile_id}/default", token)
+        self._expect(response, {200}, "thingsboard_profile_default_failed")
+
+    async def delete_device_profile(self, token: str, profile_id: UUID) -> None:
+        response = await self._authorized("DELETE", f"/api/deviceProfile/{profile_id}", token)
+        if response.status_code not in {200, 404}:
+            self._expect(response, {200}, "thingsboard_profile_delete_failed")
+
+    @staticmethod
+    def verify_asset_uid(asset: dict[str, object], expected: UUID) -> None:
+        additional_info = asset.get("additionalInfo")
+        if not isinstance(additional_info, dict) or additional_info.get("smartAlarmAssetUid") != str(expected):
+            raise PlatformAdminError("thingsboard_asset_identity_conflict", retryable=False)
+
+    @staticmethod
+    def verify_profile_uid(profile: dict[str, object], expected: UUID) -> None:
+        description = profile.get("description")
+        if description != f"Smart Alarm profile {expected}":
+            raise PlatformAdminError("thingsboard_profile_identity_conflict", retryable=False)
 
     async def delete_device(self, token: str, device_id: UUID) -> None:
         response = await self._authorized("DELETE", f"/api/device/{device_id}", token)

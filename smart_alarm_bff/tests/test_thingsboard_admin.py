@@ -44,6 +44,27 @@ def device_payload(name: str = "stc-device") -> dict[str, object]:
     }
 
 
+def asset_payload(name: str = "stc-asset") -> dict[str, object]:
+    return {
+        "id": entity(ASSET_ID, "ASSET"),
+        "customerId": entity(CUSTOMER_ID, "CUSTOMER"),
+        "name": name,
+        "type": "SITE",
+        "label": "Lobby",
+        "additionalInfo": {"smartAlarmAssetUid": str(ASSET_ID)},
+    }
+
+
+def profile_payload(name: str = "mqtt-profile") -> dict[str, object]:
+    return {
+        "id": entity(PROFILE_ID, "DEVICE_PROFILE"),
+        "name": name,
+        "type": "DEFAULT",
+        "transportType": "MQTT",
+        "description": f"Smart Alarm profile {PROFILE_ID}",
+    }
+
+
 class ThingsBoardAdminClientTest(unittest.TestCase):
     @staticmethod
     def execute_scenario(handler, scenario):  # type: ignore[no-untyped-def]
@@ -178,6 +199,78 @@ class ThingsBoardAdminClientTest(unittest.TestCase):
         self.assertEqual(requests[3].url.path, f"/api/customer/device/{DEVICE_ID}")
         self.assertEqual(json.loads(requests[4].content)["from"], entity(ASSET_ID, "ASSET"))
         self.assertEqual(requests[5].url.params["relationTypeGroup"], "COMMON")
+
+    def test_asset_crud_assignment_and_relation_contracts(self) -> None:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.method == "POST" and request.url.path == "/api/asset":
+                payload = json.loads(request.content)
+                self.assertEqual(payload["additionalInfo"], {"smartAlarmAssetUid": str(ASSET_ID)})
+                return httpx.Response(200, json=asset_payload())
+            if request.method == "POST" and request.url.path == f"/api/customer/{CUSTOMER_ID}/asset/{ASSET_ID}":
+                return httpx.Response(200, json=asset_payload())
+            if request.method == "GET" and request.url.path == f"/api/asset/{ASSET_ID}":
+                return httpx.Response(200, json=asset_payload())
+            if request.method == "POST" and request.url.path == "/api/relation":
+                return httpx.Response(200, json={})
+            if request.method == "DELETE" and request.url.path == "/api/relation":
+                return httpx.Response(200, json={})
+            if request.method == "DELETE" and request.url.path == f"/api/customer/asset/{ASSET_ID}":
+                return httpx.Response(200, json={})
+            if request.method == "DELETE" and request.url.path == f"/api/asset/{ASSET_ID}":
+                return httpx.Response(200, json={})
+            raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+        async def scenario(client: ThingsBoardAdminClient) -> None:
+            await client.create_asset(
+                "service.jwt", name="stc-asset", label="Lobby", asset_type="SITE",
+                asset_uid=ASSET_ID, customer_id=CUSTOMER_ID,
+            )
+            await client.update_asset(
+                "service.jwt", ASSET_ID, name="stc-asset", label="Updated", asset_type="SITE", asset_uid=ASSET_ID,
+            )
+            await client.save_asset_relation("service.jwt", ASSET_ID, ASSET_ID)
+            await client.delete_asset_relation("service.jwt", ASSET_ID, ASSET_ID)
+            await client.unassign_asset("service.jwt", ASSET_ID)
+            await client.delete_asset("service.jwt", ASSET_ID)
+
+        self.execute_scenario(handler, scenario)
+        self.assertEqual(requests[2].url.path, f"/api/asset/{ASSET_ID}")
+        self.assertEqual(requests[5].url.params["toType"], "ASSET")
+
+    def test_asset_response_loss_recovers_only_matching_inventory_identity(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                return httpx.Response(503)
+            self.assertEqual(request.url.path, "/api/tenant/assets")
+            return httpx.Response(200, json=asset_payload())
+
+        result = self.execute_scenario(handler, lambda client: client.create_asset(
+            "service.jwt", name="stc-asset", label="Lobby", asset_type="SITE",
+            asset_uid=ASSET_ID, customer_id=None,
+        ))
+        self.assertEqual(result["uuid"], ASSET_ID)
+
+    def test_device_profile_payload_and_identity_marker(self) -> None:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.method == "POST":
+                payload = json.loads(request.content)
+                self.assertEqual(payload["profileData"]["transportConfiguration"]["type"], "MQTT")
+                self.assertEqual(payload["profileData"]["transportConfiguration"]["transportPayloadTypeConfiguration"], {"transportPayloadType": "JSON"})
+                return httpx.Response(200, json=profile_payload())
+            raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+        result = self.execute_scenario(handler, lambda client: client.create_device_profile(
+            "service.jwt", name="mqtt-profile", profile_type="DEFAULT", transport_type="MQTT",
+            profile_uid=PROFILE_ID, is_default=True,
+        ))
+        self.assertEqual(result["uuid"], PROFILE_ID)
+        self.assertEqual(requests[0].url.path, "/api/deviceProfile")
 
     def test_device_customer_scope_is_strict_and_normalizes_null_uuid(self) -> None:
         payload = device_payload()
