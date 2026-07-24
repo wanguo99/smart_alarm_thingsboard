@@ -37,6 +37,9 @@ def alarm_command() -> dict[str, object]:
         "query": {
             "entityFilter": {"type": "entityType", "entityType": "DEVICE"},
             "pageLink": {"page": 0, "pageSize": 100, "timeWindow": 1, "statusList": ["ACTIVE"]},
+            "entityFields": [],
+            "latestValues": [],
+            "keyFilters": [],
             "alarmFields": [{"type": "ALARM_FIELD", "key": key} for key in fields],
         },
     }

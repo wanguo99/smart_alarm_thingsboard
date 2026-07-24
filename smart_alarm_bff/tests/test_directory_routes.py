@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
+from uuid import UUID
 
 try:
     from fastapi import APIRouter
-    from smart_alarm_bff.directory_routes import _page, register_directory_routes
+    from smart_alarm_bff.directory_routes import _page, _system_audit_entry, register_directory_routes
 except ModuleNotFoundError as exc:
     _missing_dependency = exc.name
 else:
@@ -35,8 +37,40 @@ class DirectoryRouteContractTest(unittest.TestCase):
             "/api/v1/system/tenants",
             "/api/v1/system/users",
             "/api/v1/system/role-assignments",
+            "/api/v1/system/audit",
             "/api/v1/system/tenants/{tenant_id}/users",
         }.issubset(paths))
+
+    def test_system_audit_entry_preserves_scope_and_resource_context(self) -> None:
+        actor_id = UUID("10000000-0000-4000-8000-000000000001")
+        row = {
+            "id": 42,
+            "tenant_id": None,
+            "actor_user_id": actor_id,
+            "actor_username": "sysadmin",
+            "request_id": "request-123",
+            "action": "TENANT_CREATED",
+            "resource_type": "TENANT",
+            "resource_id": "tenant-1",
+            "outcome": "SUCCEEDED",
+            "detail": {"name": "XXX交警大队"},
+            "created_at": datetime(2026, 7, 24, tzinfo=timezone.utc),
+        }
+        self.assertEqual(_system_audit_entry(row), {
+            "auditId": "42",
+            "tenantId": "SYSTEM",
+            "subject": "sysadmin",
+            "deviceUid": None,
+            "action": "TENANT_CREATED",
+            "requestId": "request-123",
+            "details": {
+                "name": "XXX交警大队",
+                "resourceType": "TENANT",
+                "resourceId": "tenant-1",
+                "outcome": "SUCCEEDED",
+            },
+            "createdAt": 1784851200000,
+        })
 
 
 if __name__ == "__main__":

@@ -33,6 +33,40 @@ def _page(rows: list[dict[str, object]]) -> dict[str, object]:
     }
 
 
+def _audit_limit(request: Request) -> int:
+    values = request.query_params.getlist("limit")
+    if len(values) > 1:
+        raise DirectoryError("invalid_limit", 400)
+    raw = values[0] if values else "100"
+    try:
+        limit = int(raw)
+    except ValueError as exc:
+        raise DirectoryError("invalid_limit", 400) from exc
+    if not 1 <= limit <= 200:
+        raise DirectoryError("invalid_limit", 400)
+    return limit
+
+
+def _system_audit_entry(row: Any) -> dict[str, object]:
+    details = dict(row["detail"])
+    details.update({
+        "resourceType": row["resource_type"],
+        "resourceId": row["resource_id"],
+        "outcome": row["outcome"],
+    })
+    actor = row["actor_username"] or (str(row["actor_user_id"]) if row["actor_user_id"] else "SYSTEM")
+    return {
+        "auditId": str(row["id"]),
+        "tenantId": str(row["tenant_id"]) if row["tenant_id"] else "SYSTEM",
+        "subject": actor,
+        "deviceUid": row["resource_id"] if row["resource_type"] == "DEVICE" else None,
+        "action": row["action"],
+        "requestId": row["request_id"],
+        "details": details,
+        "createdAt": int(row["created_at"].timestamp() * 1000),
+    }
+
+
 def _principal(request: Request) -> ProductPrincipal:
     context = getattr(request.state, "session_context", None)
     if not isinstance(context, SessionContext):
@@ -313,6 +347,29 @@ def register_directory_routes(router: APIRouter, sessions: SessionService, datab
             async with _scoped_connection(await database(), principal) as connection:
                 rows = await connection.fetch("SELECT ra.user_id, u.authority, pr.role_key FROM smart_alarm.role_assignments ra JOIN smart_alarm.users u ON u.id = ra.user_id JOIN smart_alarm.product_roles pr ON pr.id = ra.role_id WHERE ra.status = 'ACTIVE' AND pr.status = 'ACTIVE' ORDER BY ra.user_id")
             return _page([{"userId": str(row["user_id"]), "authority": row["authority"], "productRole": row["role_key"]} for row in rows])
+        except DirectoryError as exc:
+            return _error(exc)
+
+    @router.get("/api/v1/system/audit")
+    async def system_audit(request: Request):
+        try:
+            principal = await guard(request)
+            _require(principal, "system:audit:read")
+            limit = _audit_limit(request)
+            async with _scoped_connection(await database(), principal) as connection:
+                rows = await connection.fetch(
+                    """
+                    SELECT ae.id, ae.tenant_id, ae.actor_user_id, u.username AS actor_username,
+                           ae.request_id, ae.action, ae.resource_type, ae.resource_id,
+                           ae.outcome, ae.detail, ae.created_at
+                    FROM smart_alarm.audit_events ae
+                    LEFT JOIN smart_alarm.users u ON u.id = ae.actor_user_id
+                    ORDER BY ae.created_at DESC, ae.id DESC
+                    LIMIT $1
+                    """,
+                    limit,
+                )
+            return _page([_system_audit_entry(row) for row in rows])
         except DirectoryError as exc:
             return _error(exc)
 

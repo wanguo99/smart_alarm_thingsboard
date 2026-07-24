@@ -14,6 +14,7 @@ import uvicorn
 
 from . import __version__
 from .activation_routes import mount_activation_routes
+from .alarm_routes import mount_alarm_routes
 from .config import ConfigError, load_settings
 from .infrastructure import Infrastructure
 from .directory_routes import mount_directory_routes
@@ -151,6 +152,7 @@ def create_app() -> FastAPI:
     mount_device_routes(app, sessions, infrastructure.database)
     mount_entity_query_routes(app, sessions, infrastructure.database, infrastructure.thingsboard)
     mount_activation_routes(app, infrastructure.database, infrastructure.device_secrets)
+    mount_alarm_routes(app, sessions, infrastructure.database, infrastructure.thingsboard)
     mount_websocket_proxy(
         app,
         sessions,

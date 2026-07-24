@@ -51,6 +51,9 @@ def _alarm_command(command: dict[str, Any], allowed_device_ids: frozenset[str]) 
     entity_filter = query.get("entityFilter")
     page_link = query.get("pageLink")
     alarm_fields = query.get("alarmFields")
+    entity_fields = query.get("entityFields")
+    latest_values = query.get("latestValues")
+    key_filters = query.get("keyFilters")
     if (
         not isinstance(entity_filter, dict)
         or entity_filter.get("type") != "entityType"
@@ -63,6 +66,9 @@ def _alarm_command(command: dict[str, Any], allowed_device_ids: frozenset[str]) 
         or page_link["timeWindow"] <= 0
         or page_link.get("statusList") != ["ACTIVE"]
         or not isinstance(alarm_fields, list)
+        or entity_fields != []
+        or latest_values != []
+        or key_filters != []
     ):
         raise WebSocketPolicyError("unsupported alarm query")
     fields = {

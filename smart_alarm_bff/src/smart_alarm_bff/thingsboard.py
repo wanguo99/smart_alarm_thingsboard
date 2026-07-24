@@ -191,6 +191,145 @@ class ThingsBoardClient:
             raise ThingsBoardError("invalid_platform_entity_query_response", retryable=False) from exc
         return self._normalize_entity_query(payload, device_ids, requested_keys)
 
+    async def list_alarms(
+        self,
+        access_token: str,
+        *,
+        page: int,
+        page_size: int,
+        search_status: str,
+        sort_property: str,
+        sort_order: str,
+    ) -> dict[str, object]:
+        response = await self._authorized(
+            "GET",
+            "/api/alarms",
+            access_token,
+            params={
+                "page": page,
+                "pageSize": page_size,
+                "searchStatus": search_status,
+                "sortProperty": sort_property,
+                "sortOrder": sort_order,
+                "fetchOriginator": "true",
+            },
+        )
+        if response.status_code != 200:
+            raise ThingsBoardError(
+                "platform_alarm_query_failed",
+                retryable=response.status_code >= 500 or response.status_code == 429,
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ThingsBoardError("invalid_platform_alarm_response", retryable=False) from exc
+        return self._normalize_alarm_page(payload)
+
+    async def get_alarm(self, access_token: str, alarm_id: UUID) -> dict[str, object]:
+        response = await self._authorized("GET", f"/api/alarm/info/{alarm_id}", access_token)
+        if response.status_code != 200:
+            raise ThingsBoardError(
+                "platform_alarm_read_failed",
+                retryable=response.status_code >= 500 or response.status_code == 429,
+            )
+        return self._normalize_alarm(response)
+
+    async def acknowledge_alarm(self, access_token: str, alarm_id: UUID) -> dict[str, object]:
+        response = await self._authorized("POST", f"/api/alarm/{alarm_id}/ack", access_token)
+        if response.status_code != 200:
+            raise ThingsBoardError(
+                "platform_alarm_ack_failed",
+                retryable=response.status_code >= 500 or response.status_code == 429,
+            )
+        return self._normalize_alarm(response)
+
+    async def clear_alarm(self, access_token: str, alarm_id: UUID) -> dict[str, object]:
+        response = await self._authorized("POST", f"/api/alarm/{alarm_id}/clear", access_token)
+        if response.status_code != 200:
+            raise ThingsBoardError(
+                "platform_alarm_clear_failed",
+                retryable=response.status_code >= 500 or response.status_code == 429,
+            )
+        return self._normalize_alarm(response)
+
+    @classmethod
+    def _normalize_alarm_page(cls, payload: object) -> dict[str, object]:
+        if not isinstance(payload, dict) or set(payload).difference({"data", "totalPages", "totalElements", "hasNext"}):
+            raise ThingsBoardError("invalid_platform_alarm_response", retryable=False)
+        data = payload.get("data")
+        total_pages = payload.get("totalPages")
+        total_elements = payload.get("totalElements")
+        has_next = payload.get("hasNext")
+        if (
+            not isinstance(data, list)
+            or not isinstance(total_pages, int) or isinstance(total_pages, bool) or total_pages < 0
+            or not isinstance(total_elements, int) or isinstance(total_elements, bool) or total_elements < 0
+            or not isinstance(has_next, bool)
+            or total_elements < len(data)
+        ):
+            raise ThingsBoardError("invalid_platform_alarm_response", retryable=False)
+        return {
+            "data": [cls._normalize_alarm_payload(item) for item in data],
+            "totalPages": total_pages,
+            "totalElements": total_elements,
+            "hasNext": has_next,
+        }
+
+    @classmethod
+    def _normalize_alarm(cls, response: httpx.Response) -> dict[str, object]:
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ThingsBoardError("invalid_platform_alarm_response", retryable=False) from exc
+        return cls._normalize_alarm_payload(payload)
+
+    @staticmethod
+    def _normalize_alarm_payload(payload: object) -> dict[str, object]:
+        if not isinstance(payload, dict):
+            raise ThingsBoardError("invalid_platform_alarm_response", retryable=False)
+        allowed = {
+            "id", "originator", "originatorName", "type", "severity", "createdTime", "startTs",
+            "endTs", "ackTs", "clearTs", "status", "details", "assigneeId", "assignTs",
+            "propagate", "propagateToOwner", "propagateToTenant", "propagateRelationTypes",
+            "acknowledged", "cleared", "assignee", "customerId", "tenantId", "name",
+            "originatorDisplayName", "originatorLabel",
+        }
+        if set(payload).difference(allowed):
+            raise ThingsBoardError("invalid_platform_alarm_response", retryable=False)
+        alarm_id = payload.get("id")
+        originator = payload.get("originator")
+        if not isinstance(alarm_id, dict) or alarm_id.get("entityType") != "ALARM" or not isinstance(alarm_id.get("id"), str):
+            raise ThingsBoardError("invalid_platform_alarm_response", retryable=False)
+        if not isinstance(originator, dict) or originator.get("entityType") != "DEVICE" or not isinstance(originator.get("id"), str):
+            raise ThingsBoardError("invalid_platform_alarm_response", retryable=False)
+        try:
+            UUID(alarm_id["id"])
+            UUID(originator["id"])
+        except ValueError as exc:
+            raise ThingsBoardError("invalid_platform_alarm_response", retryable=False) from exc
+        if not isinstance(payload.get("type"), str) or not payload["type"]:
+            raise ThingsBoardError("invalid_platform_alarm_response", retryable=False)
+        if payload.get("severity") not in {"CRITICAL", "MAJOR", "MINOR", "WARNING", "INDETERMINATE"}:
+            raise ThingsBoardError("invalid_platform_alarm_response", retryable=False)
+        if payload.get("status") not in {"ACTIVE_UNACK", "ACTIVE_ACK", "CLEARED_UNACK", "CLEARED_ACK"}:
+            raise ThingsBoardError("invalid_platform_alarm_response", retryable=False)
+        for key in ("createdTime", "startTs", "endTs", "ackTs", "clearTs"):
+            value = payload.get(key)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ThingsBoardError("invalid_platform_alarm_response", retryable=False)
+        if "originatorName" in payload and payload["originatorName"] is not None and not isinstance(payload["originatorName"], str):
+            raise ThingsBoardError("invalid_platform_alarm_response", retryable=False)
+        if "details" in payload and payload["details"] is not None and not isinstance(payload["details"], dict):
+            raise ThingsBoardError("invalid_platform_alarm_response", retryable=False)
+        return {
+            key: payload[key]
+            for key in (
+                "id", "originator", "originatorName", "type", "severity", "createdTime",
+                "startTs", "endTs", "ackTs", "clearTs", "status", "details",
+            )
+            if key in payload
+        }
+
     @staticmethod
     def _normalize_entity_query(
         payload: object,
